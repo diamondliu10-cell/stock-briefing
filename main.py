@@ -65,6 +65,16 @@ def load_stocks():
         print("找不到stocks.txt")
     return stocks
 
+def format_amount(amount_yuan):
+    """智能单位转换：大于1亿显示亿，否则显示万"""
+    if amount_yuan is None:
+        return "0"
+    yi = amount_yuan / 1e8
+    if abs(yi) >= 0.01:
+        return f"{yi:.2f}亿元"
+    wan = amount_yuan / 1e4
+    return f"{wan:.0f}万元"
+
 # ------------------------------------------------------------
 # 1. 行情数据（东方财富 + 新浪备份）
 # ------------------------------------------------------------
@@ -148,19 +158,34 @@ def get_notices(stock_code):
         return []
 
 # ------------------------------------------------------------
-# 4. 个股市场情绪（东方财富人气榜排名）
+# 4. 个股资讯（东方财富，补充发布会等事件）
+# ------------------------------------------------------------
+def get_news(stock_code):
+    """抓取个股最新5条资讯标题，补充公告之外的事件信息"""
+    url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+    params = {
+        "page_size": 5, "page_index": 1,
+        "stock_list": stock_code,
+        "f_node": 0,  # 0=全部, 1=公告, 2=研报
+        "s_node": 0
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        items = r.json()["data"]["list"]
+        return [f"{item['notice_date'][:10]} {item['title']}" for item in items]
+    except:
+        return []
+
+# ------------------------------------------------------------
+# 5. 个股市场情绪（东方财富人气榜排名）
 # ------------------------------------------------------------
 def get_stock_sentiment(code):
-    """
-    获取个股市场情绪：东方财富人气榜排名。
-    排名越靠前，关注度越高。
-    """
-    # 构造secid用于人气榜接口
     secid = get_secid(code)
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": secid,
-        "fields": "f12,f14,f19,f20,f92",  # f92：人气排名
+        "fields": "f12,f14,f19,f20,f92",
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -168,14 +193,14 @@ def get_stock_sentiment(code):
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json().get("data", {})
         rank = data.get("f92", None)
-        if rank is not None:
+        if rank is not None and int(rank) > 0:
             return f"人气排名第{int(rank)}位"
         return "暂无排名数据"
     except:
         return "获取失败"
 
 # ------------------------------------------------------------
-# 5. 十大流通股东透视（社保/北向）
+# 6. 十大流通股东透视（社保/北向）
 # ------------------------------------------------------------
 def get_market_suffix(code):
     if code.startswith(("0", "3", "1")):
@@ -235,24 +260,25 @@ def generate_ai_summary(stocks_data):
         if sd.get("price"):
             data_text += f"现价{sd['price']}元，涨跌幅{sd['change_pct']}%"
         if sd.get("amount"):
-            data_text += f"，成交额{sd['amount']}元；"
-        data_text += f"主力净流入{sd['main_net_in']:.0f}元，占比{sd['main_net_pct']:.2f}%；"
+            data_text += f"，成交额{format_amount(sd['amount'])}；"
+        data_text += f"主力资金：{format_amount(sd['main_net_in'])}，占比{sd['main_net_pct']:.2f}%；"
         if sd.get("sentiment"):
-            data_text += f"市场情绪：{sd['sentiment']}；"
+            data_text += f"人气：{sd['sentiment']}；"
         if sd.get("notices"):
             data_text += f"公告：{'；'.join(sd['notices'])}；"
+        if sd.get("news"):
+            data_text += f"资讯：{'；'.join(sd['news'])}；"
         if sd.get("holders_info") and sd["holders_info"] != ["（暂无最新股东数据）"]:
-            data_text += f"重要股东动向：{'；'.join(sd['holders_info'])}"
-        else:
-            data_text += "重要股东动向：无"
+            data_text += f"股东动向：{'；'.join(sd['holders_info'])}"
 
-    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。根据以下今日数据，为每只股票生成简短判断（不超过60字），并用一句话总结整体账户风险。
+    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。根据以下数据，为每只股票生成简短判断（不超过60字），并用一句话总结整体账户风险。
 
-要求：
-1. 直接指出最关键的变化或风险。
-2. 数据平淡则说“今日无异常”。
-3. 每只股票前标注🔴（风险）或🟢（积极）或➖（中性）。
-4. 最后单独一行给出整体账户今日最需要关注的风险点。
+重要规则：
+1. 公告中已包含“2026年一季报”的，请基于已有数据判断，不要说“等待一季报”。
+2. 资讯中包含“发布会”“业绩说明会”“重大合同”等事件的，请重点提及。
+3. 资金数据已智能显示单位（亿元/万元），请直接引用。
+4. 每只股票前标注🔴（风险）或🟢（积极）或➖（中性）。
+5. 最后单独一行给出整体风险总结。
 
 {data_text}
 
@@ -266,7 +292,7 @@ def generate_ai_summary(stocks_data):
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 700
+        "max_tokens": 800
     }
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=25)
@@ -292,6 +318,7 @@ def main():
         basic = get_stock_basic(code, secid)
         flow = get_fund_flow(secid)
         notices = get_notices(code)
+        news = get_news(code)  # 新增：个股资讯
         sentiment = get_stock_sentiment(code)
         holders = get_top_holders(code)
 
@@ -303,6 +330,7 @@ def main():
             "main_net_in": flow["main_net_in"],
             "main_net_pct": flow["main_net_pct"],
             "notices": notices,
+            "news": news,
             "sentiment": sentiment,
             "holders_info": holders
         })
@@ -332,14 +360,11 @@ def main():
                     label = " 🔴大跌"
             body += f"  💰 现价 {sd['price']}元 | 涨跌 {pct}%{label}\n"
             if sd.get("amount"):
-                amount_yi = sd['amount'] / 1e8
-                body += f"  📊 成交额 {amount_yi:.2f} 亿元\n"
+                body += f"  📊 成交额 {format_amount(sd['amount'])}\n"
         else:
             body += f"  💰 行情获取异常（已尝试东方财富及新浪）\n"
 
-        main_in_yi = sd['main_net_in'] / 1e8 if sd.get('main_net_in') else 0
-        body += f"  💵 主力资金：净流入 {main_in_yi:.2f} 亿元 (占比 {sd['main_net_pct']:.2f}%)\n"
-
+        body += f"  💵 主力资金：净流入 {format_amount(sd['main_net_in'])} (占比 {sd['main_net_pct']:.2f}%)\n"
         body += f"  📈 市场情绪：{sd.get('sentiment', '获取失败')}\n"
 
         body += f"  🔍 重要股东动向（社保/北向）:\n"
@@ -358,6 +383,11 @@ def main():
                 body += f"    • {n}\n"
         else:
             body += f"  📰 最新公告：无\n"
+
+        if sd.get("news"):
+            body += f"  📰 最新资讯：\n"
+            for n in sd['news']:
+                body += f"    • {n}\n"
 
     body += "\n━━━━━━━━━━━━━━━━━━━━\n"
     body += "数据来源：东方财富、新浪财经 | 分析：DeepSeek AI | 本简报不构成投资建议，请独立决策。"
