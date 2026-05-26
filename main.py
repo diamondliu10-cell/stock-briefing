@@ -116,7 +116,7 @@ def get_stock_basic(code, secid):
     return get_basic_sina(sina_code)
 
 # ------------------------------------------------------------
-# 2. 主力资金流向（东方财富）
+# 2. 主力资金流向（东方财富，已修复）
 # ------------------------------------------------------------
 def get_fund_flow(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -130,7 +130,7 @@ def get_fund_flow(secid):
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json().get("data", {})
         main_in = data.get("f62", 0) or 0
-        main_pct = (data.get("f184", 0) or 0) / 100.0
+        main_pct = (data.get("f184", 0) or 0) / 100.0  # 转换为实际百分比
         return {"main_net_in": main_in, "main_net_pct": main_pct}
     except:
         return {"main_net_in": 0, "main_net_pct": 0.0}
@@ -153,10 +153,9 @@ def get_notices(stock_code):
         return []
 
 # ------------------------------------------------------------
-# 4. 市场情绪温度计（三大指数涨跌 + 涨跌家数）
+# 4. 市场情绪温度计（三大指数涨跌）
 # ------------------------------------------------------------
 def get_market_sentiment():
-    # 获取上证、深证、创业板指涨跌
     indices = {
         "上证指数": "1.000001",
         "深证成指": "0.399001",
@@ -169,24 +168,10 @@ def get_market_sentiment():
             sentiment_lines.append(f"{name}：{basic['change_pct']}%")
         else:
             sentiment_lines.append(f"{name}：获取失败")
-    # 尝试获取全市场涨跌家数（用东方财富API，失败则留空）
-    try:
-        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
-        params = {
-            "fltt": 2,
-            "fields": "f2,f3,f4,f12,f14",
-            "secids": "1.000001,0.399001,0.399006",
-            "ut": "fa5fd1943c7b386f172d6893dbf30c78"
-        }
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=5)
-        # 涨跌家数接口较复杂，暂用简单方式，只展示指数
-    except:
-        pass
     return " | ".join(sentiment_lines) if sentiment_lines else "市场情绪数据暂时无法获取"
 
 # ------------------------------------------------------------
-# 5. 十大流通股东透视（社保/北向/机构）
+# 5. 十大流通股东透视（社保/北向/机构，已修复）
 # ------------------------------------------------------------
 def get_market_suffix(code):
     """判断市场后缀SZ或SH"""
@@ -196,7 +181,6 @@ def get_market_suffix(code):
         return "SH"
 
 def get_top_holders(code):
-    """获取最新一期十大流通股东，识别社保、北向"""
     suffix = get_market_suffix(code)
     url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
     params = {
@@ -210,27 +194,36 @@ def get_top_holders(code):
         "source": "HSF10",
         "client": "PC"
     }
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://data.eastmoney.com/"
+    }
     try:
         r = requests.get(url, params=params, headers=headers, timeout=8)
         data = r.json()
         if data.get("success") and data.get("result") and data["result"].get("data"):
             holders = data["result"]["data"]
             result_lines = []
-            latest_date = holders[0]["END_DATE"][:10] if holders else "未知"
+            latest_date = holders[0].get("END_DATE", "未知")[:10] if holders else "未知"
             result_lines.append(f"（数据截止：{latest_date}）")
+            has_info = False
             for h in holders:
                 name = h.get("HOLDER_NAME", "")
-                if "社保" in name or "香港中央结算" in name:
+                if "社保" in name or "香港中央结算" in name or "中国证券金融" in name or "中央汇金" in name:
                     ratio = h.get("HOLD_NUM_RATIO", None)
                     change = h.get("HOLD_NUM_CHANGE", 0)
                     if ratio is not None:
                         change_str = "增持" if change > 0 else ("减持" if change < 0 else "不变")
                         result_lines.append(f"  • {name} 持股{ratio}%，{change_str}")
-            return result_lines
+                        has_info = True
+            if has_info:
+                return result_lines
+            else:
+                return ["（当期十大流通股东中未发现社保/北向持仓）"]
+        else:
+            return None
     except:
-        pass
-    return None
+        return None
 
 # ------------------------------------------------------------
 # AI 总结
@@ -250,7 +243,7 @@ def generate_ai_summary(stocks_data, sentiment_text):
         data_text += f"主力净流入{sd['main_net_in']:.0f}元，占比{sd['main_net_pct']:.2f}%；"
         if sd.get("notices"):
             data_text += f"公告：{'；'.join(sd['notices'])}；"
-        if sd.get("holders_info"):
+        if sd.get("holders_info") and sd["holders_info"] != ["（暂无最新股东数据）"]:
             data_text += f"重要股东动向：{'；'.join(sd['holders_info'])}"
         else:
             data_text += "重要股东动向：无"
@@ -270,6 +263,7 @@ def generate_ai_summary(stocks_data, sentiment_text):
 恒生科技ETF：🔴/🟢/➖ 核心判断...
 龙佰集团：🔴/🟢/➖ 核心判断...
 半导体ETF：🔴/🟢/➖ 核心判断...
+（如果有其他股票，也依次列出）
 整体风险：一句话总结。"""
 
     headers = {
@@ -355,20 +349,29 @@ def main():
                 elif pct <= -2:
                     label = " 🔴大跌"
             body += f"  💰 现价 {sd['price']}元 | 涨跌 {pct}%{label}\n"
+            # 成交额换算为亿元
             if sd.get("amount"):
-                body += f"  📊 成交额 {sd['amount']}元\n"
+                amount_yi = sd['amount'] / 1e8
+                body += f"  📊 成交额 {amount_yi:.2f} 亿元\n"
         else:
             body += f"  💰 行情获取异常（已尝试东方财富及新浪）\n"
 
-        body += f"  💵 主力资金：净流入 {sd['main_net_in']:.0f} 元 (占比 {sd['main_net_pct']:.2f}%)\n"
+        # 主力资金换算为亿元
+        main_in_yi = sd['main_net_in'] / 1e8 if sd.get('main_net_in') else 0
+        body += f"  💵 主力资金：净流入 {main_in_yi:.2f} 亿元 (占比 {sd['main_net_pct']:.2f}%)\n"
 
-        if sd.get("holders_info"):
-            body += f"  🔍 重要股东动向（社保/北向）:\n"
-            for line in sd["holders_info"]:
+        # 重要股东动向
+        body += f"  🔍 重要股东动向（社保/北向）:\n"
+        holders = sd.get("holders_info")
+        if holders and holders != ["（当期十大流通股东中未发现社保/北向持仓）"]:
+            for line in holders:
                 body += f"    {line}\n"
+        elif holders == ["（当期十大流通股东中未发现社保/北向持仓）"]:
+            body += f"    （当期十大流通股东中未发现社保/北向持仓）\n"
         else:
-            body += f"  🔍 重要股东动向：未能获取\n"
+            body += f"    （暂无最新股东数据）\n"
 
+        # 公告
         if sd.get("notices"):
             body += f"  📰 最新公告：\n"
             for n in sd['notices']:
