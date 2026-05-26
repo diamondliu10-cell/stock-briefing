@@ -1,7 +1,6 @@
 import requests
 import smtplib
 import os
-import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -38,14 +37,12 @@ def send_email(subject, body):
         print(f"邮件发送失败：{e}")
 
 def get_secid(code):
-    """根据代码生成东方财富secid"""
     if code.startswith("0") or code.startswith("3"):
         return f"0.{code}"
     else:
         return f"1.{code}"
 
 def get_sina_code(code):
-    """生成新浪行情代码（例如 sh600519, sz000651）"""
     if code.startswith(("6", "5", "9")):
         return f"sh{code}"
     else:
@@ -69,7 +66,7 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# 1. 行情数据（东方财富为主，新浪备份）
+# 1. 行情数据（东方财富 + 新浪备份）
 # ------------------------------------------------------------
 def get_basic_em(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -108,15 +105,13 @@ def get_basic_sina(sina_code):
     return None
 
 def get_stock_basic(code, secid):
-    # 优先东方财富，失败则用新浪备份
     result = get_basic_em(secid)
     if result and result["price"] is not None:
         return result
-    sina_code = get_sina_code(code)
-    return get_basic_sina(sina_code)
+    return get_basic_sina(get_sina_code(code))
 
 # ------------------------------------------------------------
-# 2. 主力资金流向（东方财富，已修复）
+# 2. 主力资金流向（东方财富）
 # ------------------------------------------------------------
 def get_fund_flow(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -130,7 +125,7 @@ def get_fund_flow(secid):
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json().get("data", {})
         main_in = data.get("f62", 0) or 0
-        main_pct = (data.get("f184", 0) or 0) / 100.0  # 转换为实际百分比
+        main_pct = (data.get("f184", 0) or 0) / 100.0
         return {"main_net_in": main_in, "main_net_pct": main_pct}
     except:
         return {"main_net_in": 0, "main_net_pct": 0.0}
@@ -153,29 +148,37 @@ def get_notices(stock_code):
         return []
 
 # ------------------------------------------------------------
-# 4. 市场情绪温度计（三大指数涨跌）
+# 4. 个股市场情绪（东方财富人气榜排名）
 # ------------------------------------------------------------
-def get_market_sentiment():
-    indices = {
-        "上证指数": "1.000001",
-        "深证成指": "0.399001",
-        "创业板指": "0.399006"
+def get_stock_sentiment(code):
+    """
+    获取个股市场情绪：东方财富人气榜排名。
+    排名越靠前，关注度越高。
+    """
+    # 构造secid用于人气榜接口
+    secid = get_secid(code)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {
+        "secid": secid,
+        "fields": "f12,f14,f19,f20,f92",  # f92：人气排名
+        "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
-    sentiment_lines = []
-    for name, secid in indices.items():
-        basic = get_basic_em(secid)
-        if basic and basic.get("change_pct") is not None:
-            sentiment_lines.append(f"{name}：{basic['change_pct']}%")
-        else:
-            sentiment_lines.append(f"{name}：获取失败")
-    return " | ".join(sentiment_lines) if sentiment_lines else "市场情绪数据暂时无法获取"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        data = r.json().get("data", {})
+        rank = data.get("f92", None)
+        if rank is not None:
+            return f"人气排名第{int(rank)}位"
+        return "暂无排名数据"
+    except:
+        return "获取失败"
 
 # ------------------------------------------------------------
-# 5. 十大流通股东透视（社保/北向/机构，已修复）
+# 5. 十大流通股东透视（社保/北向）
 # ------------------------------------------------------------
 def get_market_suffix(code):
-    """判断市场后缀SZ或SH"""
-    if code.startswith(("0", "3", "1")):  # 深市包含创业板、ETF
+    if code.startswith(("0", "3", "1")):
         return "SZ"
     else:
         return "SH"
@@ -187,17 +190,11 @@ def get_top_holders(code):
         "reportName": "RPT_F10_EH_HOLDERS",
         "columns": "HOLDER_NAME,HOLDER_NUM,HOLD_NUM_CHANGE,HOLD_NUM_RATIO,END_DATE",
         "filter": f'(SECUCODE="{code}.{suffix}")(IS_HOLDORG=1)',
-        "pageNumber": 1,
-        "pageSize": 10,
-        "sortTypes": -1,
-        "sortColumns": "END_DATE",
-        "source": "HSF10",
-        "client": "PC"
+        "pageNumber": 1, "pageSize": 10,
+        "sortTypes": -1, "sortColumns": "END_DATE",
+        "source": "HSF10", "client": "PC"
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Referer": "https://data.eastmoney.com/"
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=8)
         data = r.json()
@@ -209,7 +206,7 @@ def get_top_holders(code):
             has_info = False
             for h in holders:
                 name = h.get("HOLDER_NAME", "")
-                if "社保" in name or "香港中央结算" in name or "中国证券金融" in name or "中央汇金" in name:
+                if any(keyword in name for keyword in ["社保", "香港中央结算", "中国证券金融", "中央汇金"]):
                     ratio = h.get("HOLD_NUM_RATIO", None)
                     change = h.get("HOLD_NUM_CHANGE", 0)
                     if ratio is not None:
@@ -228,12 +225,11 @@ def get_top_holders(code):
 # ------------------------------------------------------------
 # AI 总结
 # ------------------------------------------------------------
-def generate_ai_summary(stocks_data, sentiment_text):
+def generate_ai_summary(stocks_data):
     if not DEEPSEEK_API_KEY:
         return "❌ 未设置 DEEPSEEK_API_KEY"
 
-    data_text = f"【市场情绪】{sentiment_text}\n\n"
-    data_text += "【持仓股票数据】\n"
+    data_text = "【持仓股票数据】\n"
     for sd in stocks_data:
         data_text += f"\n{sd['name']}({sd['code']})："
         if sd.get("price"):
@@ -241,6 +237,8 @@ def generate_ai_summary(stocks_data, sentiment_text):
         if sd.get("amount"):
             data_text += f"，成交额{sd['amount']}元；"
         data_text += f"主力净流入{sd['main_net_in']:.0f}元，占比{sd['main_net_pct']:.2f}%；"
+        if sd.get("sentiment"):
+            data_text += f"市场情绪：{sd['sentiment']}；"
         if sd.get("notices"):
             data_text += f"公告：{'；'.join(sd['notices'])}；"
         if sd.get("holders_info") and sd["holders_info"] != ["（暂无最新股东数据）"]:
@@ -248,28 +246,22 @@ def generate_ai_summary(stocks_data, sentiment_text):
         else:
             data_text += "重要股东动向：无"
 
-    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。请根据以下今日数据，为每只股票生成简短判断（不超过60字），并用一句话总结整体账户风险。
+    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。根据以下今日数据，为每只股票生成简短判断（不超过60字），并用一句话总结整体账户风险。
 
 要求：
-1. 直接指出最关键的变化或风险（例如主力资金连续流出、公告重大利好/利空、社保增持或退出等）。
+1. 直接指出最关键的变化或风险。
 2. 数据平淡则说“今日无异常”。
-3. 每只股票前面标注🔴（风险）或🟢（积极）或➖（中性）。
+3. 每只股票前标注🔴（风险）或🟢（积极）或➖（中性）。
 4. 最后单独一行给出整体账户今日最需要关注的风险点。
 
 {data_text}
 
 请按以下格式输出：
 比亚迪：🔴/🟢/➖ 核心判断...
-恒生科技ETF：🔴/🟢/➖ 核心判断...
-龙佰集团：🔴/🟢/➖ 核心判断...
-半导体ETF：🔴/🟢/➖ 核心判断...
-（如果有其他股票，也依次列出）
+（其他股票依次列出）
 整体风险：一句话总结。"""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
@@ -294,42 +286,32 @@ def main():
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # 1. 市场情绪
-    sentiment = get_market_sentiment()
-
-    # 2. 个股数据
     stocks_data = []
     for code, name in stocks:
         secid = get_secid(code)
         basic = get_stock_basic(code, secid)
         flow = get_fund_flow(secid)
         notices = get_notices(code)
+        sentiment = get_stock_sentiment(code)
         holders = get_top_holders(code)
 
-        stock_item = {
-            "code": code,
-            "name": name,
+        stocks_data.append({
+            "code": code, "name": name,
             "price": basic["price"] if basic else None,
             "change_pct": basic["change_pct"] if basic else None,
             "amount": basic["amount"] if basic else None,
             "main_net_in": flow["main_net_in"],
             "main_net_pct": flow["main_net_pct"],
             "notices": notices,
+            "sentiment": sentiment,
             "holders_info": holders
-        }
-        stocks_data.append(stock_item)
+        })
 
-    # 3. AI 总结
-    ai_summary = generate_ai_summary(stocks_data, sentiment)
+    ai_summary = generate_ai_summary(stocks_data)
 
-    # 4. 构建邮件
     body = f"📈 持仓全量智能简报 ({now})\n"
     body += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    # 市场情绪
-    body += f"【🌡️ 市场情绪】\n{sentiment}\n\n"
-
-    # AI 判断
     if ai_summary and not ai_summary.startswith("❌"):
         body += "【今日核心判断（AI生成）】\n"
         body += ai_summary + "\n\n"
@@ -349,18 +331,17 @@ def main():
                 elif pct <= -2:
                     label = " 🔴大跌"
             body += f"  💰 现价 {sd['price']}元 | 涨跌 {pct}%{label}\n"
-            # 成交额换算为亿元
             if sd.get("amount"):
                 amount_yi = sd['amount'] / 1e8
                 body += f"  📊 成交额 {amount_yi:.2f} 亿元\n"
         else:
             body += f"  💰 行情获取异常（已尝试东方财富及新浪）\n"
 
-        # 主力资金换算为亿元
         main_in_yi = sd['main_net_in'] / 1e8 if sd.get('main_net_in') else 0
         body += f"  💵 主力资金：净流入 {main_in_yi:.2f} 亿元 (占比 {sd['main_net_pct']:.2f}%)\n"
 
-        # 重要股东动向
+        body += f"  📈 市场情绪：{sd.get('sentiment', '获取失败')}\n"
+
         body += f"  🔍 重要股东动向（社保/北向）:\n"
         holders = sd.get("holders_info")
         if holders and holders != ["（当期十大流通股东中未发现社保/北向持仓）"]:
@@ -371,7 +352,6 @@ def main():
         else:
             body += f"    （暂无最新股东数据）\n"
 
-        # 公告
         if sd.get("notices"):
             body += f"  📰 最新公告：\n"
             for n in sd['notices']:
