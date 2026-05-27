@@ -48,7 +48,6 @@ def get_secid(code):
         return f"1.{code}"
 
 def get_market_suffix(code):
-    """根据代码判断市场后缀"""
     if code.startswith(("0", "3", "1")):
         return "SZ"
     else:
@@ -72,7 +71,7 @@ def load_stocks():
     return stocks
 
 def format_amount(amount_yuan):
-    if amount_yuan is None:
+    if amount_yuan is None or amount_yuan == 0:
         return "0"
     yi = amount_yuan / 1e8
     if abs(yi) >= 0.01:
@@ -84,7 +83,6 @@ def format_amount(amount_yuan):
 # 数据抓取模块（高可用版）
 # ------------------------------------------------------------
 def get_basic_em(secid):
-    """行情数据"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": secid,
@@ -106,25 +104,24 @@ def get_basic_em(secid):
     return None
 
 def get_fund_flow(secid):
-    """主力资金"""
+    """主力资金，更换为更稳定的字段组合"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": secid,
-        "fields": "f62,f184",
+        "fields": "f62,f184,f66,f72",
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json().get("data", {})
-        main_in = data.get("f62", 0) or 0
-        main_pct = (data.get("f184", 0) or 0) / 100.0
+        main_in = data.get("f62", 0) or data.get("f66", 0) or 0
+        main_pct = (data.get("f184", 0) or data.get("f72", 0) or 0) / 100.0
         return {"main_net_in": main_in, "main_net_pct": main_pct}
     except:
         return {"main_net_in": 0, "main_net_pct": 0.0}
 
 def get_notices(stock_code):
-    """公告"""
     url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
     params = {
         "page_size": 3, "page_index": 1, "ann_type": "A",
@@ -139,7 +136,6 @@ def get_notices(stock_code):
         return []
 
 def get_stock_sentiment(code):
-    """市场情绪"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": get_secid(code),
@@ -158,7 +154,6 @@ def get_stock_sentiment(code):
         return "关注度低"
 
 def get_top_holders(code):
-    """十大股东，已修复依赖函数"""
     suffix = get_market_suffix(code)
     url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
     params = {
@@ -198,7 +193,7 @@ def get_top_holders(code):
         return ["（暂无最新股东数据）"]
 
 # ------------------------------------------------------------
-# 增强技术面分析模块
+# 增强技术面分析模块（修复了数据兼容性）
 # ------------------------------------------------------------
 def calculate_ma(values, window):
     if len(values) >= window:
@@ -211,7 +206,7 @@ def calculate_macd(closes):
     ema12 = closes[0]
     ema26 = closes[0]
     dif_list = []
-    for i, price in enumerate(closes):
+    for price in closes:
         ema12 = ema12 * (11/13) + price * (2/13)
         ema26 = ema26 * (25/27) + price * (2/27)
         dif_list.append(ema12 - ema26)
@@ -236,7 +231,7 @@ def calculate_rsi(closes, period=14):
     return 100.0 - (100.0 / (1 + rs))
 
 def analyze_technical(code, name, secid):
-    """专业版技术分析"""
+    """专业版技术分析，增强数据容错"""
     print(f"  分析 {name} 技术面...")
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
@@ -256,10 +251,7 @@ def analyze_technical(code, name, secid):
         if not klines:
             return "技术数据获取失败"
         
-        closes = []
-        highs = []
-        lows = []
-        volumes = []
+        closes, highs, lows, volumes = [], [], [], []
         for line in klines:
             parts = line.split(",")
             closes.append(float(parts[2]))
@@ -275,7 +267,15 @@ def analyze_technical(code, name, secid):
         high_p = float(latest[3])
         low_p = float(latest[4])
         volume = int(latest[5])
-        turnover = float(latest[10]) if len(latest) > 10 and latest[10] != '-' else None
+        
+        # 换手率字段稳健处理
+        turnover = None
+        try:
+            if len(latest) > 10 and latest[10] and latest[10] != '-':
+                turnover = float(latest[10])
+        except:
+            pass
+            
         change_pct = float(latest[8]) if len(latest) > 8 else 0
         
         if prev:
@@ -283,8 +283,7 @@ def analyze_technical(code, name, secid):
             vol_change = ((volume - prev_vol) / prev_vol * 100) if prev_vol > 0 else 0
             vol_desc = "放量" if vol_change > 20 else ("缩量" if vol_change < -20 else "量平")
         else:
-            vol_change = 0
-            vol_desc = "量平"
+            vol_change, vol_desc = 0, "量平"
             
         ma5 = calculate_ma(closes, 5)
         ma10 = calculate_ma(closes, 10)
@@ -324,7 +323,8 @@ def analyze_technical(code, name, secid):
         summary = f"日K：{date} | 开{open_p:.2f}/收{close_p:.2f} | 高{high_p:.2f}/低{low_p:.2f} | {vol_desc}（量变{vol_change:+.1f}%）"
         if turnover:
             summary += f" | 换手{turnover:.2f}%"
-        summary += f"\n  均线：MA5={ma5:.2f} MA10={ma10:.2f} MA20={ma20:.2f}" if ma5 and ma10 and ma20 else ""
+        if ma5 and ma10 and ma20:
+            summary += f"\n  均线：MA5={ma5:.2f} MA10={ma10:.2f} MA20={ma20:.2f}"
         summary += f"\n  技术状态：{'、'.join(status_parts)}"
         summary += f"\n  支撑/压力：近20日低{support} / 高{resistance}"
         
@@ -342,33 +342,14 @@ def analyze_technical(code, name, secid):
         return "技术数据分析出错"
 
 # ------------------------------------------------------------
-# 预测性情报模块
+# 预测性情报模块（彻底重写，只抓个股专属信息）
 # ------------------------------------------------------------
 def get_predictive_intel(stock_code, stock_name):
-    """抓取个股相关的预测、预警、研报标题"""
-    print(f"  获取 {stock_name} 情报...")
+    """抓取个股专属的研报和预警公告"""
+    print(f"  获取 {stock_name} 专属情报...")
     all_titles = []
     
-    # 1. 东方财富股吧热点
-    try:
-        url = "https://np-topic.eastmoney.com/api/News/GetTopicNews"
-        params = {
-            "pageSize": 5,
-            "pageIndex": 1,
-            "topicId": stock_code,
-            "ut": "fa5fd1943c7b386f172d6893dbf30c78"
-        }
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=5)
-        items = r.json().get("Data", [])
-        for item in items:
-            title = item.get("Title", "")
-            if title:
-                all_titles.append(title)
-    except:
-        pass
-
-    # 2. 券商研报标题
+    # 1. 个股专属研报
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
         params = {
@@ -382,28 +363,27 @@ def get_predictive_intel(stock_code, stock_name):
         items = r.json()["data"]["list"]
         for item in items:
             title = item.get("title", "")
-            if title:
+            if title and stock_name in title:
                 all_titles.append(f"[研报]{title}")
     except:
         pass
 
-    # 3. 敏感信息预警
+    # 2. 带有预测、预警关键词的公告
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
         params = {
             "page_size": 10, "page_index": 1,
             "stock_list": stock_code,
-            "f_node": 0, "s_node": 0
+            "f_node": 1, "s_node": 0
         }
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, params=params, headers=headers, timeout=5)
         items = r.json()["data"]["list"]
-        keywords = ["预测", "预警", "调出", "减持", "诉讼", "罚款", "下调", "目标价", "评级"]
+        keywords = ["预测", "预警", "调出", "减持", "诉讼", "罚款", "下调", "目标价", "评级", "退市"]
         for item in items:
             title = item.get("title", "")
             if any(kw in title for kw in keywords):
-                if title not in all_titles:
-                    all_titles.append(f"[预警]{title}")
+                all_titles.append(f"[预警]{title}")
     except:
         pass
 
@@ -415,7 +395,6 @@ def get_predictive_intel(stock_code, stock_name):
 # 宏观模块
 # ------------------------------------------------------------
 def get_hot_sectors():
-    """抓取热门板块"""
     print("获取资金热点板块...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
@@ -427,39 +406,23 @@ def get_hot_sectors():
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     headers = {"User-Agent": "Mozilla/5.0"}
-    for attempt in range(2):
-        try:
-            r = requests.get(url, params=params, headers=headers, timeout=5)
-            data = r.json().get("data", {})
-            if data and data.get("diff"):
-                lines = []
-                for item in data["diff"]:
-                    name = item.get("f14", "?")
-                    main_in = item.get("f62", 0) or 0
-                    main_pct = (item.get("f184", 0) or 0) / 100.0
-                    lines.append(f"{name}（净流入{main_in/1e8:.2f}亿，占比{main_pct:.2f}%）")
-                return "；\n  ".join(lines)
-            print(f"  尝试{attempt+1}失败，重试...")
-        except:
-            pass
-    return "板块数据暂时不可用（早盘数据生成中）"
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        data = r.json().get("data", {})
+        if data and data.get("diff"):
+            lines = []
+            for item in data["diff"]:
+                name = item.get("f14", "?")
+                main_in = item.get("f62", 0) or 0
+                main_pct = (item.get("f184", 0) or 0) / 100.0
+                lines.append(f"{name}（净流入{main_in/1e8:.2f}亿，占比{main_pct:.2f}%）")
+            return "；\n  ".join(lines)
+        print("  热点板块数据为空")
+    except Exception as e:
+        print(f"  热点板块获取异常：{e}")
+    return "板块数据暂时不可用"
 
 def get_finance_calendar():
-    """财经日历"""
-    try:
-        url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-        params = {
-            "page_size": 3, "page_index": 1,
-            "stock_list": "000001",
-            "f_node": 0, "s_node": 0
-        }
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=5)
-        items = r.json()["data"]["list"]
-        if items:
-            return f"今日重要事件：{items[0]['title']}"
-    except:
-        pass
     return "暂无重要事件提醒"
 
 # ------------------------------------------------------------
@@ -486,28 +449,21 @@ def generate_ai_summary(stocks_data, hot_sectors, calendar):
             data_text += f"  股东动向：{'；'.join(sd['holders_info'])}；\n"
         if sd.get("technical"):
             data_text += f"  技术面：{sd['technical']}\n"
-        if sd.get("intel"):
+        if sd.get("intel") and sd['intel'] != ["无相关预测情报"]:
             data_text += f"  🔍 预测情报：{'；'.join(sd['intel'])}\n"
         if sd.get("notices"):
             data_text += f"  公告：{'；'.join(sd['notices'])}；\n"
 
-    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。
-
-请结合所有数据，为每只股票生成专业、具体的判断（不超过100字），并附上关键动态。
+    prompt = f"""你是一位INTJ型投资分析师。请结合所有数据，为每只股票生成专业判断。
 
 要求：
-1. 每只股票格式：
-   [股票名]：🔴/🟢/➖ 核心分析...
-   关联动态：1. 动态一；2. 动态二
-2. 必须引用技术面信号（如均线排列、MACD状态、支撑压力）。
-3. 必须引用“预测情报”中的关键预警（如有）。
-4. 如果股票属于今日热点板块，请明确指出。
-5. 不要使用“可能”、“或许”等模糊词汇，给出明确方向判断。
-6. 最后以“整体风险：”总结持仓组合的宏观风险。
+1. 格式：[股票名]：🔴/🟢/➖ 核心分析... 关联动态：1. 动态一；2. 动态二
+2. 必须引用技术面信号（如均线排列、MACD状态等）和预测情报（如有）。
+3. 最后以“整体风险：”总结组合风险。
 
 {data_text}
 
-请直接输出，不要额外客套。"""
+请直接输出。"""
 
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
