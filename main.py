@@ -104,7 +104,7 @@ def get_basic_em(secid):
         else:
             return None
     except Exception as e:
-        print(f"  警告：获取{secid}行情失败 - {e}")
+        print(f"  警告：获取行情失败 - {e}")
         return None
 
 def get_basic_sina(sina_code):
@@ -125,7 +125,6 @@ def get_basic_sina(sina_code):
     return None
 
 def get_stock_basic(code, secid):
-    print(f"  正在获取 {name} 行情...")
     result = get_basic_em(secid)
     if result and result["price"] is not None:
         return result
@@ -242,14 +241,12 @@ def get_top_holders(code):
         return None
 
 # ------------------------------------------------------------
-# 技术面分析模块（修复了接口URL）
+# 技术面分析模块
 # ------------------------------------------------------------
 def get_kline_data(code, secid, period="daily", limit=20):
-    """获取日K或周K数据，修复了请求URL"""
     klt_map = {"daily": 101, "weekly": 102}
     klt = klt_map.get(period, 101)
     
-    # 修复后的历史K线接口
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
         "secid": secid,
@@ -257,7 +254,7 @@ def get_kline_data(code, secid, period="daily", limit=20):
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": klt,
-        "fqt": 1,  # 前复权
+        "fqt": 1,
         "end": "20500101",
         "lmt": limit
     }
@@ -267,14 +264,13 @@ def get_kline_data(code, secid, period="daily", limit=20):
         data = r.json()
         if data.get("data") and data["data"].get("klines"):
             return data["data"]["klines"]
-        print(f"    警告：{period}K线数据为空 - {r.text[:200]}")
+        print(f"    警告：{period}K线数据为空")
         return []
     except Exception as e:
         print(f"    错误：获取{period}K线失败 - {e}")
         return []
 
 def analyze_technical(code, name, secid):
-    """分析个股技术面并返回文字摘要"""
     print(f"  正在分析 {name} 技术面...")
     daily_k = get_kline_data(code, secid, "daily", 20)
     weekly_k = get_kline_data(code, secid, "weekly", 10)
@@ -337,17 +333,16 @@ def analyze_technical(code, name, secid):
         return "技术数据分析出错"
 
 # ------------------------------------------------------------
-# 宏观模块：市场热点板块
+# 宏观模块
 # ------------------------------------------------------------
 def get_hot_sectors():
-    """抓取全市场主力资金流入最多的5个行业板块，修复了请求参数"""
     print("正在获取资金热点板块...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "fid": "f62",
         "po": 1, "pz": 5, "pn": 1, "np": 1,
         "fltt": 2, "invt": 2,
-        "fs": "m:90+t2",  # 行业板块
+        "fs": "m:90+t2",
         "fields": "f12,f14,f62,f184",
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
@@ -356,7 +351,7 @@ def get_hot_sectors():
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json().get("data", {})
         if not data or not data.get("diff"):
-            print(f"  警告：热点板块数据为空 - {r.text[:200]}")
+            print(f"  警告：热点板块数据为空")
             return "获取失败"
         
         lines = []
@@ -371,7 +366,6 @@ def get_hot_sectors():
         return "获取失败"
 
 def get_finance_calendar():
-    # 暂时保留占位符，未来可升级
     return "暂无重要事件提醒（可后续接入专业财经日历API）"
 
 # ------------------------------------------------------------
@@ -447,11 +441,9 @@ def main():
         send_email("股票简报 - 错误", "股票列表为空")
         return
 
-    # 1. 宏观视角
     hot_sectors = get_hot_sectors()
     calendar = get_finance_calendar()
 
-    # 2. 个股数据（含技术面）
     stocks_data = []
     for code, name in stocks:
         print(f"处理股票：{name}({code})")
@@ -478,11 +470,9 @@ def main():
             "technical": technical
         })
 
-    # 3. AI 分析
     print("正在请求AI分析...")
     ai_summary = generate_ai_summary(stocks_data, hot_sectors, calendar)
 
-    # 4. 构建邮件
     now = beijing_now()
     body = f"📈 持仓智能深度简报 ({now} 北京时间)\n"
     body += "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -516,7 +506,6 @@ def main():
 
         body += f"  💵 主力资金：净流入 {format_amount(sd['main_net_in'])} (占比 {sd['main_net_pct']:.2f}%)\n"
         
-        # 技术面
         if sd.get("technical"):
             body += f"  📈 技术面：{sd['technical']}\n"
         else:
