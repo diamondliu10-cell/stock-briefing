@@ -2,7 +2,6 @@ name: 每日投资简报
 
 on:
   schedule:
-    # 北京时间早上8:00 (UTC 0:00)
     - cron: '0 0 * * *'
   workflow_dispatch:
 
