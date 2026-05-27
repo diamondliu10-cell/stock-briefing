@@ -26,7 +26,7 @@ def send_email(subject, body):
     password = os.environ.get("EMAIL_PASS")
     to_addr = os.environ.get("EMAIL_TO")
     if not user or not password or not to_addr:
-        print("邮件凭证缺失")
+        print("错误：邮件凭证缺失，请检查 GitHub Secrets。")
         return
     msg = MIMEMultipart()
     msg["From"] = user
@@ -41,7 +41,7 @@ def send_email(subject, body):
         server.quit()
         print("邮件发送成功")
     except Exception as e:
-        print(f"邮件发送失败：{e}")
+        print(f"错误：邮件发送失败 - {e}")
 
 def get_secid(code):
     if code.startswith("0") or code.startswith("3"):
@@ -69,7 +69,7 @@ def load_stocks():
                     name = parts[1].strip()
                     stocks.append((code, name))
     except FileNotFoundError:
-        print("找不到stocks.txt")
+        print("错误：找不到stocks.txt文件，请检查仓库根目录。")
     return stocks
 
 def format_amount(amount_yuan):
@@ -95,12 +95,16 @@ def get_basic_em(secid):
     try:
         r = requests.get(url, params=params, headers=headers, timeout=5)
         data = r.json()["data"]
-        return {
-            "price": data["f43"] / 100 if data.get("f43") else None,
-            "change_pct": data["f170"] / 100 if data.get("f170") else None,
-            "amount": data["f48"] if data.get("f48") else None
-        }
-    except:
+        if data:
+            return {
+                "price": data["f43"] / 100 if data.get("f43") else None,
+                "change_pct": data["f170"] / 100 if data.get("f170") else None,
+                "amount": data["f48"] if data.get("f48") else None
+            }
+        else:
+            return None
+    except Exception as e:
+        print(f"  警告：获取{secid}行情失败 - {e}")
         return None
 
 def get_basic_sina(sina_code):
@@ -121,6 +125,7 @@ def get_basic_sina(sina_code):
     return None
 
 def get_stock_basic(code, secid):
+    print(f"  正在获取 {name} 行情...")
     result = get_basic_em(secid)
     if result and result["price"] is not None:
         return result
@@ -237,20 +242,20 @@ def get_top_holders(code):
         return None
 
 # ------------------------------------------------------------
-# 新增模块：个股技术面分析（日K、周K、量能、换手率）
+# 技术面分析模块（修复了接口URL）
 # ------------------------------------------------------------
 def get_kline_data(code, secid, period="daily", limit=20):
-    """获取日K或周K数据"""
-    # period: 101=日K, 102=周K
+    """获取日K或周K数据，修复了请求URL"""
     klt_map = {"daily": 101, "weekly": 102}
     klt = klt_map.get(period, 101)
     
+    # 修复后的历史K线接口
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
         "secid": secid,
         "ut": "fa5fd1943c7b386f172d6893dbf30c78",
         "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": klt,
         "fqt": 1,  # 前复权
         "end": "20500101",
@@ -262,107 +267,111 @@ def get_kline_data(code, secid, period="daily", limit=20):
         data = r.json()
         if data.get("data") and data["data"].get("klines"):
             return data["data"]["klines"]
+        print(f"    警告：{period}K线数据为空 - {r.text[:200]}")
         return []
-    except:
+    except Exception as e:
+        print(f"    错误：获取{period}K线失败 - {e}")
         return []
 
 def analyze_technical(code, name, secid):
     """分析个股技术面并返回文字摘要"""
-    # 获取日K（最近20个交易日）
+    print(f"  正在分析 {name} 技术面...")
     daily_k = get_kline_data(code, secid, "daily", 20)
-    # 获取周K（最近10周）
     weekly_k = get_kline_data(code, secid, "weekly", 10)
     
     if not daily_k:
         return "技术数据获取失败"
     
-    # 解析最新日K
-    last_day = daily_k[-1].split(",")  # 日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
-    # 解析前一日日K
-    prev_day = daily_k[-2].split(",") if len(daily_k) >= 2 else None
-    
-    # 关键指标
-    date = last_day[0]
-    open_price = float(last_day[1])
-    close_price = float(last_day[2])
-    high = float(last_day[3])
-    low = float(last_day[4])
-    volume = int(last_day[5])
-    turnover_rate = float(last_day[10]) if len(last_day) > 10 else None
-    
-    # 涨跌幅
-    change_pct = float(last_day[8]) if len(last_day) > 8 else 0
-    
-    # 量能对比（与前一日比较）
-    if prev_day:
-        prev_volume = int(prev_day[5])
-        vol_change = ((volume - prev_volume) / prev_volume * 100) if prev_volume > 0 else 0
-        vol_desc = "放量" if vol_change > 20 else ("缩量" if vol_change < -20 else "量平")
-    else:
-        vol_change = 0
-        vol_desc = "量平"
-    
-    # 周K趋势简化判断
-    weekly_desc = "数据不足"
-    if len(weekly_k) >= 2:
-        last_week = weekly_k[-1].split(",")
-        prev_week = weekly_k[-2].split(",")
-        last_week_close = float(last_week[2])
-        prev_week_close = float(prev_week[2])
-        weekly_change = (last_week_close - prev_week_close) / prev_week_close * 100
-        if weekly_change > 3:
-            weekly_desc = f"周线趋势向上({weekly_change:+.2f}%)"
-        elif weekly_change < -3:
-            weekly_desc = f"周线趋势向下({weekly_change:+.2f}%)"
+    try:
+        last_day = daily_k[-1].split(",")
+        prev_day = daily_k[-2].split(",") if len(daily_k) >= 2 else None
+        
+        date = last_day[0]
+        open_price = float(last_day[1])
+        close_price = float(last_day[2])
+        high = float(last_day[3])
+        low = float(last_day[4])
+        volume = int(last_day[5])
+        turnover_rate = float(last_day[10]) if len(last_day) > 10 and last_day[10] != '-' else None
+        
+        change_pct = float(last_day[8]) if len(last_day) > 8 else 0
+        
+        if prev_day:
+            prev_volume = int(prev_day[5])
+            vol_change = ((volume - prev_volume) / prev_volume * 100) if prev_volume > 0 else 0
+            vol_desc = "放量" if vol_change > 20 else ("缩量" if vol_change < -20 else "量平")
         else:
-            weekly_desc = f"周线横盘({weekly_change:+.2f}%)"
-    
-    # 构建技术摘要
-    summary = f"日K：{date} | 开{open_price:.2f}/收{close_price:.2f} | 高{high:.2f}/低{low:.2f} | {vol_desc}（量变{vol_change:+.1f}%）"
-    if turnover_rate is not None:
-        summary += f" | 换手率{turnover_rate:.2f}%"
-    summary += f"\n  周K：{weekly_desc}"
-    
-    # 简单技术判断
-    if change_pct > 2 and vol_desc == "放量":
-        summary += " | 放量上涨，短线偏强"
-    elif change_pct < -2 and vol_desc == "放量":
-        summary += " | 放量下跌，短线偏弱"
-    elif abs(change_pct) < 1 and vol_desc == "缩量":
-        summary += " | 窄幅缩量整理"
-    
-    return summary
+            vol_change = 0
+            vol_desc = "量平"
+        
+        weekly_desc = "数据不足"
+        if len(weekly_k) >= 2:
+            last_week = weekly_k[-1].split(",")
+            prev_week = weekly_k[-2].split(",")
+            if len(last_week) > 2 and len(prev_week) > 2:
+                last_week_close = float(last_week[2])
+                prev_week_close = float(prev_week[2])
+                weekly_change = (last_week_close - prev_week_close) / prev_week_close * 100
+                if weekly_change > 3:
+                    weekly_desc = f"周线趋势向上({weekly_change:+.2f}%)"
+                elif weekly_change < -3:
+                    weekly_desc = f"周线趋势向下({weekly_change:+.2f}%)"
+                else:
+                    weekly_desc = f"周线横盘({weekly_change:+.2f}%)"
+        
+        summary = f"日K：{date} | 开{open_price:.2f}/收{close_price:.2f} | 高{high:.2f}/低{low:.2f} | {vol_desc}（量变{vol_change:+.1f}%）"
+        if turnover_rate is not None:
+            summary += f" | 换手率{turnover_rate:.2f}%"
+        summary += f"\n  周K：{weekly_desc}"
+        
+        if change_pct > 2 and vol_desc == "放量":
+            summary += " | 放量上涨，短线偏强"
+        elif change_pct < -2 and vol_desc == "放量":
+            summary += " | 放量下跌，短线偏弱"
+        elif abs(change_pct) < 1 and vol_desc == "缩量":
+            summary += " | 窄幅缩量整理"
+        
+        return summary
+    except Exception as e:
+        print(f"  错误：技术分析处理异常 - {e}")
+        return "技术数据分析出错"
 
 # ------------------------------------------------------------
-# 宏观模块：市场热点板块与财经日历
+# 宏观模块：市场热点板块
 # ------------------------------------------------------------
 def get_hot_sectors():
+    """抓取全市场主力资金流入最多的5个行业板块，修复了请求参数"""
+    print("正在获取资金热点板块...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
         "fid": "f62",
         "po": 1, "pz": 5, "pn": 1, "np": 1,
         "fltt": 2, "invt": 2,
-        "fs": "m:90+t2",
-        "fields": "f12,f14,f62,f184,f3",
+        "fs": "m:90+t2",  # 行业板块
+        "fields": "f12,f14,f62,f184",
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=5)
-        data = r.json().get("data", {}).get("diff", [])
-        if not data:
+        data = r.json().get("data", {})
+        if not data or not data.get("diff"):
+            print(f"  警告：热点板块数据为空 - {r.text[:200]}")
             return "获取失败"
+        
         lines = []
-        for item in data:
+        for item in data["diff"]:
             name = item.get("f14", "?")
             main_in = item.get("f62", 0) or 0
             main_pct = (item.get("f184", 0) or 0) / 100.0
             lines.append(f"{name}（主力净流入{main_in/1e8:.2f}亿，占比{main_pct:.2f}%）")
         return "；\n  ".join(lines)
-    except:
+    except Exception as e:
+        print(f"  错误：获取热点板块失败 - {e}")
         return "获取失败"
 
 def get_finance_calendar():
+    # 暂时保留占位符，未来可升级
     return "暂无重要事件提醒（可后续接入专业财经日历API）"
 
 # ------------------------------------------------------------
@@ -432,12 +441,11 @@ def generate_ai_summary(stocks_data, hot_sectors, calendar):
 # 主流程
 # ------------------------------------------------------------
 def main():
+    print(f"简报任务开始 - {beijing_now()}")
     stocks = load_stocks()
     if not stocks:
         send_email("股票简报 - 错误", "股票列表为空")
         return
-
-    now = beijing_now()  # 北京时间
 
     # 1. 宏观视角
     hot_sectors = get_hot_sectors()
@@ -446,6 +454,7 @@ def main():
     # 2. 个股数据（含技术面）
     stocks_data = []
     for code, name in stocks:
+        print(f"处理股票：{name}({code})")
         secid = get_secid(code)
         basic = get_stock_basic(code, secid)
         flow = get_fund_flow(secid)
@@ -453,7 +462,7 @@ def main():
         news = get_news(code)
         sentiment = get_stock_sentiment(code)
         holders = get_top_holders(code)
-        technical = analyze_technical(code, name, secid)  # 新增技术分析
+        technical = analyze_technical(code, name, secid)
 
         stocks_data.append({
             "code": code, "name": name,
@@ -470,9 +479,11 @@ def main():
         })
 
     # 3. AI 分析
+    print("正在请求AI分析...")
     ai_summary = generate_ai_summary(stocks_data, hot_sectors, calendar)
 
     # 4. 构建邮件
+    now = beijing_now()
     body = f"📈 持仓智能深度简报 ({now} 北京时间)\n"
     body += "━━━━━━━━━━━━━━━━━━━━\n\n"
 
@@ -508,6 +519,8 @@ def main():
         # 技术面
         if sd.get("technical"):
             body += f"  📈 技术面：{sd['technical']}\n"
+        else:
+            body += f"  📈 技术面：获取失败\n"
         
         body += f"  📈 市场情绪：{sd.get('sentiment', '获取失败')}\n"
 
@@ -524,8 +537,9 @@ def main():
     body += "\n━━━━━━━━━━━━━━━━━━━━\n"
     body += "数据来源：东方财富、新浪财经 | 分析：DeepSeek AI | 本简报不构成投资建议，请独立决策。"
 
-    print(body)
+    print("简报生成完毕，正在发送邮件...")
     send_email(f"📈 投资简报 {now}", body)
+    print(f"简报任务结束 - {beijing_now()}")
 
 if __name__ == "__main__":
     main()
