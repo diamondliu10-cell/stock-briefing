@@ -1,7 +1,6 @@
 import requests
 import smtplib
 import os
-import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
@@ -48,6 +47,13 @@ def get_secid(code):
     else:
         return f"1.{code}"
 
+def get_market_suffix(code):
+    """根据代码判断市场后缀"""
+    if code.startswith(("0", "3", "1")):
+        return "SZ"
+    else:
+        return "SH"
+
 def load_stocks():
     stocks = []
     try:
@@ -75,10 +81,10 @@ def format_amount(amount_yuan):
     return f"{wan:.0f}万元"
 
 # ------------------------------------------------------------
-# 数据抓取模块（已全部更换为高可用接口）
+# 数据抓取模块（高可用版）
 # ------------------------------------------------------------
 def get_basic_em(secid):
-    """行情数据，东方财富为主"""
+    """行情数据"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": secid,
@@ -100,7 +106,7 @@ def get_basic_em(secid):
     return None
 
 def get_fund_flow(secid):
-    """主力资金，采用更通用的接口"""
+    """主力资金"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": secid,
@@ -132,25 +138,8 @@ def get_notices(stock_code):
     except:
         return []
 
-def get_news(stock_code):
-    """资讯"""
-    url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-    params = {
-        "page_size": 5, "page_index": 1,
-        "stock_list": stock_code,
-        "f_node": 0, "s_node": 0
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=5)
-        items = r.json()["data"]["list"]
-        return [f"{item['notice_date'][:10]} {item['title']}" for item in items]
-    except:
-        return []
-
 def get_stock_sentiment(code):
-    """市场情绪，改用个股新闻热度"""
-    # 改用东方财富个股新闻热度排名，更稳定
+    """市场情绪"""
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
         "secid": get_secid(code),
@@ -169,7 +158,7 @@ def get_stock_sentiment(code):
         return "关注度低"
 
 def get_top_holders(code):
-    """十大股东，增加备用逻辑"""
+    """十大股东，已修复依赖函数"""
     suffix = get_market_suffix(code)
     url = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
     params = {
@@ -255,7 +244,7 @@ def analyze_technical(code, name, secid):
         "ut": "fa5fd1943c7b386f172d6893dbf30c78",
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": 101,  # 日K
+        "klt": 101,
         "fqt": 1,
         "end": "20500101",
         "lmt": 60
@@ -278,7 +267,6 @@ def analyze_technical(code, name, secid):
             lows.append(float(parts[4]))
             volumes.append(int(parts[5]))
         
-        # 最新数据
         latest = klines[-1].split(",")
         prev = klines[-2].split(",") if len(klines) > 1 else None
         date = latest[0]
@@ -290,7 +278,6 @@ def analyze_technical(code, name, secid):
         turnover = float(latest[10]) if len(latest) > 10 and latest[10] != '-' else None
         change_pct = float(latest[8]) if len(latest) > 8 else 0
         
-        # 量能对比
         if prev:
             prev_vol = int(prev[5])
             vol_change = ((volume - prev_vol) / prev_vol * 100) if prev_vol > 0 else 0
@@ -299,18 +286,13 @@ def analyze_technical(code, name, secid):
             vol_change = 0
             vol_desc = "量平"
             
-        # 均线
         ma5 = calculate_ma(closes, 5)
         ma10 = calculate_ma(closes, 10)
         ma20 = calculate_ma(closes, 20)
         
-        # MACD
         dif, macd_val = calculate_macd(closes)
-        
-        # RSI
         rsi = calculate_rsi(closes)
         
-        # 技术状态判断
         status_parts = []
         if ma5 and ma10 and ma20:
             if close_p > ma5 > ma10 > ma20:
@@ -336,7 +318,6 @@ def analyze_technical(code, name, secid):
             else:
                 status_parts.append(f"RSI中性({rsi:.1f})")
         
-        # 支撑/压力
         support = f"{min(lows[-20:]):.2f}" if len(lows) >= 20 else "?"
         resistance = f"{max(highs[-20:]):.2f}" if len(highs) >= 20 else "?"
         
@@ -347,7 +328,6 @@ def analyze_technical(code, name, secid):
         summary += f"\n  技术状态：{'、'.join(status_parts)}"
         summary += f"\n  支撑/压力：近20日低{support} / 高{resistance}"
         
-        # 周线简化
         if change_pct > 3 and vol_desc == "放量":
             summary += "\n  信号：放量突破，短线强势"
         elif change_pct < -3 and vol_desc == "放量":
@@ -362,12 +342,11 @@ def analyze_technical(code, name, secid):
         return "技术数据分析出错"
 
 # ------------------------------------------------------------
-# 新增：预测性情报模块
+# 预测性情报模块
 # ------------------------------------------------------------
 def get_predictive_intel(stock_code, stock_name):
     """抓取个股相关的预测、预警、研报标题"""
     print(f"  获取 {stock_name} 情报...")
-    # 综合搜索财经快讯和研报
     all_titles = []
     
     # 1. 东方财富股吧热点
@@ -408,8 +387,7 @@ def get_predictive_intel(stock_code, stock_name):
     except:
         pass
 
-    # 3. 微博/雪球情绪（模拟，可后期接入API）
-    # 此处用东方财富公告中的关键词过滤作为替代
+    # 3. 敏感信息预警
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
         params = {
@@ -430,14 +408,14 @@ def get_predictive_intel(stock_code, stock_name):
         pass
 
     if all_titles:
-        return all_titles[:5]  # 最多5条
+        return all_titles[:5]
     return ["无相关预测情报"]
 
 # ------------------------------------------------------------
-# 宏观：热点板块（修复）
+# 宏观模块
 # ------------------------------------------------------------
 def get_hot_sectors():
-    """抓取热门板块，增加重试机制"""
+    """抓取热门板块"""
     print("获取资金热点板块...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
     params = {
@@ -467,12 +445,12 @@ def get_hot_sectors():
     return "板块数据暂时不可用（早盘数据生成中）"
 
 def get_finance_calendar():
-    """财经日历，尝试抓取"""
+    """财经日历"""
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
         params = {
             "page_size": 3, "page_index": 1,
-            "stock_list": "000001",  # 上证指数
+            "stock_list": "000001",
             "f_node": 0, "s_node": 0
         }
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -485,7 +463,7 @@ def get_finance_calendar():
     return "暂无重要事件提醒"
 
 # ------------------------------------------------------------
-# AI 总结（增强版）
+# AI 总结
 # ------------------------------------------------------------
 def generate_ai_summary(stocks_data, hot_sectors, calendar):
     if not DEEPSEEK_API_KEY:
@@ -568,7 +546,7 @@ def main():
         sentiment = get_stock_sentiment(code)
         holders = get_top_holders(code)
         technical = analyze_technical(code, name, secid)
-        intel = get_predictive_intel(code, name)  # 新增
+        intel = get_predictive_intel(code, name)
 
         stocks_data.append({
             "code": code, "name": name,
