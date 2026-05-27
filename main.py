@@ -2,7 +2,6 @@ import akshare as ak
 import requests
 import smtplib
 import os
-import pandas as pd
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone, timedelta
@@ -62,67 +61,46 @@ def format_amount(amount_yuan):
         return f"{yi:.2f}亿元"
     return f"{amount_yuan / 1e4:.0f}万元"
 
-def is_etf(code):
-    """判断代码是否为ETF（沪市5开头，深市1开头）"""
-    return code.startswith(("5", "1"))
-
 # ------------------------------------------------------------
-# 数据获取（全部基于akshare，稳定可靠）
+# 数据获取（全部基于akshare最稳定接口）
 # ------------------------------------------------------------
-def get_stock_quote(code, name):
-    """获取个股实时行情"""
+def get_quote(code):
+    """获取实时行情，使用最基础接口"""
     try:
-        if is_etf(code):
-            # ETF行情
-            df = ak.fund_etf_spot_em()
-            row = df[df["代码"] == code]
-            if not row.empty:
-                row = row.iloc[0]
-                return {
-                    "price": float(row["最新价"]),
-                    "change_pct": float(row["涨跌幅"]),
-                    "amount": float(row["成交额"])
-                }
-        else:
-            # 股票行情
-            df = ak.stock_zh_a_spot_em()
-            row = df[df["代码"] == code]
-            if not row.empty:
-                row = row.iloc[0]
-                return {
-                    "price": float(row["最新价"]),
-                    "change_pct": float(row["涨跌幅"]),
-                    "amount": float(row["成交额"])
-                }
+        df = ak.stock_zh_a_spot_em()
+        row = df[df["代码"] == code]
+        if not row.empty:
+            row = row.iloc[0]
+            return {
+                "price": float(row["最新价"]),
+                "change_pct": float(row["涨跌幅"]),
+                "amount": float(row["成交额"]),
+                "turnover": float(row["换手率"]) if "换手率" in row else None,
+                "volume": float(row["成交量"]) if "成交量" in row else None
+            }
     except Exception as e:
         print(f"行情获取异常 {code}: {e}")
     return None
 
-def get_fund_flow(code, name):
-    """获取主力资金净流入和占比"""
+def get_fund_flow(code):
+    """获取主力资金流向，使用最通用的函数"""
     try:
-        # 使用个股资金流排名接口，数据完整
         df = ak.stock_individual_fund_flow_rank(market="沪深A股")
-        # 兼容ETF
-        if is_etf(code):
-            df = ak.stock_individual_fund_flow_rank(market="沪深ETF")
         row = df[df["代码"] == code]
         if not row.empty:
             row = row.iloc[0]
-            main_in = float(row["主力净流入"])
-            main_pct = float(row["主力净占比"])
-            return {"main_net_in": main_in, "main_net_pct": main_pct}
+            return {
+                "main_net_in": float(row["主力净流入"]),
+                "main_net_pct": float(row["主力净占比"])
+            }
     except Exception as e:
         print(f"资金流向异常 {code}: {e}")
     return {"main_net_in": 0, "main_net_pct": 0.0}
 
-def get_technical(code, name):
-    """计算技术指标（日K，MA，MACD，RSI）"""
+def get_technical(code):
+    """计算技术指标，使用最基础的历史数据接口"""
     try:
-        if is_etf(code):
-            df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
-        else:
-            df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq", start_date="20260101")
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq", start_date="20260101")
         if df.empty:
             return "技术数据不足"
         df = df.tail(60)
@@ -130,9 +108,7 @@ def get_technical(code, name):
         highs = df["最高"].tolist()
         lows = df["最低"].tolist()
         volumes = df["成交量"].tolist()
-        dates = df["日期"].tolist()
 
-        # 最新日K
         last = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else None
         date = str(last["日期"])[:10]
@@ -143,12 +119,8 @@ def get_technical(code, name):
         volume = last["成交量"]
         change_pct = (close_p - prev["收盘"]) / prev["收盘"] * 100 if prev is not None else 0
 
-        # 换手率（股票有，ETF可能没有）
-        turnover = None
-        if "换手率" in df.columns and not pd.isna(last["换手率"]):
-            turnover = float(last["换手率"])
+        turnover = last["换手率"] if "换手率" in df.columns and not pd.isna(last["换手率"]) else None
 
-        # 量能对比
         if prev is not None:
             prev_vol = prev["成交量"]
             vol_change = ((volume - prev_vol) / prev_vol * 100) if prev_vol > 0 else 0
@@ -156,35 +128,32 @@ def get_technical(code, name):
         else:
             vol_change, vol_desc = 0, "量平"
 
-        # 均线
-        def ma(data, w):
-            return sum(data[-w:]) / w if len(data) >= w else None
-        ma5 = ma(closes, 5)
-        ma10 = ma(closes, 10)
-        ma20 = ma(closes, 20)
+        ma5 = sum(closes[-5:]) / 5 if len(closes) >= 5 else None
+        ma10 = sum(closes[-10:]) / 10 if len(closes) >= 10 else None
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
 
         # MACD
-        def ema(data, n):
-            if len(data) < 2: return None
-            k = 2 / (n + 1)
-            result = [data[0]]
-            for price in data[1:]:
-                result.append(price * k + result[-1] * (1 - k))
-            return result
-        ema12 = ema(closes, 12)
-        ema26 = ema(closes, 26)
-        dif = ema12[-1] - ema26[-1] if ema12 and ema26 else None
-        dea = ema([dif], 9) if dif else None
-        macd_val = (dif - dea) * 2 if dif and dea else None
+        if len(closes) < 26:
+            dif, macd_val = None, None
+        else:
+            ema12 = closes[0]
+            ema26 = closes[0]
+            dif_list = []
+            for price in closes:
+                ema12 = ema12 * (11/13) + price * (2/13)
+                ema26 = ema26 * (25/27) + price * (2/27)
+                dif_list.append(ema12 - ema26)
+            dif = dif_list[-1]
+            dea = sum(dif_list[-9:]) / 9 if len(dif_list) >= 9 else 0
+            macd_val = (dif - dea) * 2
 
         # RSI
-        def rsi(data, n=14):
-            if len(data) < n+1: return None
-            gains = sum(max(0, data[i] - data[i-1]) for i in range(-n, 0))
-            losses = sum(max(0, data[i-1] - data[i]) for i in range(-n, 0))
-            if losses == 0: return 100.0
-            return 100.0 - 100.0 / (1 + gains / losses)
-        rsi_val = rsi(closes)
+        if len(closes) < 15:
+            rsi_val = None
+        else:
+            gains = sum(max(0, closes[i] - closes[i-1]) for i in range(-14, 0))
+            losses = sum(max(0, closes[i-1] - closes[i]) for i in range(-14, 0))
+            rsi_val = 100.0 - (100.0 / (1 + gains / losses)) if losses != 0 else 100.0
 
         status = []
         if ma5 and ma10 and ma20:
@@ -234,18 +203,16 @@ def get_intelligence(code, name):
     """获取个股研报与预警公告"""
     titles = []
     try:
-        # 研报
-        df_report = ak.stock_research_report_em(symbol=code)
-        if not df_report.empty:
-            for _, row in df_report.head(3).iterrows():
+        df = ak.stock_research_report_em(symbol=code)
+        if not df.empty:
+            for _, row in df.head(2).iterrows():
                 titles.append(f"[研报]{row['研究报告名称']}")
     except:
         pass
     try:
-        # 公告（过滤预警关键词）
-        df_notice = ak.stock_notice_report(symbol=code)
+        df = ak.stock_notice_report(symbol=code)
         keywords = ["预测", "预警", "调出", "减持", "诉讼", "罚款", "下调", "目标价", "评级", "退市"]
-        for _, row in df_notice.head(10).iterrows():
+        for _, row in df.head(10).iterrows():
             title = row["公告标题"]
             if any(kw in title for kw in keywords):
                 titles.append(f"[预警]{title}")
@@ -253,23 +220,22 @@ def get_intelligence(code, name):
         pass
     return titles[:5] if titles else ["无相关预测情报"]
 
-def get_market_sentiment(code):
-    """获取人气排名"""
+def get_sentiment(code):
+    """人气排名"""
     try:
         df = ak.stock_hot_rank_em()
         row = df[df["代码"] == code]
         if not row.empty:
-            rank = row.iloc[0]["排名"]
-            return f"人气排名第{int(rank)}位"
+            return f"人气排名第{int(row.iloc[0]['排名'])}位"
     except:
         pass
     return "关注度低"
 
-def get_top_holders(code):
-    """十大流通股东中的社保/北向"""
+def get_holders(code):
+    """十大流通股东"""
     try:
         df = ak.stock_main_stock_holder(symbol=code)
-        latest_date = str(df["截止日期"].max())[:10] if not df.empty else "?"
+        latest = str(df["截止日期"].max())[:10]
         holders = []
         for _, row in df.iterrows():
             name = row["股东名称"]
@@ -279,13 +245,13 @@ def get_top_holders(code):
                 change_str = "增持" if change > 0 else ("减持" if change < 0 else "不变")
                 holders.append(f"  • {name} 持股{ratio}%，{change_str}")
         if holders:
-            return [f"（截止：{latest_date}）"] + holders
+            return [f"（截止：{latest}）"] + holders
         return ["（未发现重要机构）"]
     except:
         return ["（暂无最新数据）"]
 
 def get_hot_sectors():
-    """热点行业板块资金流"""
+    """行业板块资金流"""
     try:
         df = ak.stock_sector_fund_flow_rank(ind="行业板块", segment="今日资金流")
         lines = []
@@ -295,11 +261,10 @@ def get_hot_sectors():
             main_pct = row["主力净占比"]
             lines.append(f"{name}（净流入{main_in/1e8:.2f}亿，占比{main_pct}%）")
         return "；\n  ".join(lines)
-    except Exception as e:
-        print(f"热点板块异常：{e}")
+    except:
         return "板块数据暂不可用"
 
-def get_finance_calendar():
+def get_calendar():
     """财经日历"""
     try:
         df = ak.stock_calendar_em()
@@ -311,7 +276,7 @@ def get_finance_calendar():
     return "暂无重要事件"
 
 # ------------------------------------------------------------
-# AI 总结（保持不变）
+# AI 总结
 # ------------------------------------------------------------
 def generate_ai_summary(stocks_data, hot_sectors, calendar):
     if not DEEPSEEK_API_KEY:
@@ -336,15 +301,13 @@ def generate_ai_summary(stocks_data, hot_sectors, calendar):
             data_text += f"  技术面：{sd['technical']}\n"
         if sd.get("intel") and sd['intel'] != ["无相关预测情报"]:
             data_text += f"  🔍 预测情报：{'；'.join(sd['intel'])}\n"
-        if sd.get("notices"):
-            data_text += f"  公告：{'；'.join(sd['notices'])}；\n"
 
     prompt = f"""你是一位INTJ型投资分析师。请结合所有数据，为每只股票生成专业判断。
 
 要求：
 1. 格式：[股票名]：🔴/🟢/➖ 核心分析... 关联动态：1. 动态一；2. 动态二
-2. 必须引用技术面信号（如均线排列、MACD、RSI、量价关系），解释成交量和换手率的含义。
-3. 若技术面数据缺失，基于价格和资金直接给出判断。
+2. 必须引用技术面信号（如均线排列、MACD、RSI、量价关系）。
+3. 若技术面缺失，基于价格和资金直接给出判断。
 4. 最后以“整体风险：”总结组合风险。
 
 {data_text}
@@ -376,17 +339,17 @@ def main():
         return
 
     hot = get_hot_sectors()
-    cal = get_finance_calendar()
+    cal = get_calendar()
 
     data_list = []
     for code, name in stocks:
         print(f"处理：{name}({code})")
-        quote = get_stock_quote(code, name)
-        flow = get_fund_flow(code, name)
-        technical = get_technical(code, name)
+        quote = get_quote(code)
+        flow = get_fund_flow(code)
+        technical = get_technical(code)
         intel = get_intelligence(code, name)
-        sentiment = get_market_sentiment(code)
-        holders = get_top_holders(code)
+        sentiment = get_sentiment(code)
+        holders = get_holders(code)
 
         data_list.append({
             "code": code, "name": name,
@@ -395,7 +358,6 @@ def main():
             "amount": quote["amount"] if quote else None,
             "main_net_in": flow["main_net_in"],
             "main_net_pct": flow["main_net_pct"],
-            "notices": [],  # 公告已集成到情报中
             "sentiment": sentiment,
             "holders_info": holders,
             "technical": technical,
