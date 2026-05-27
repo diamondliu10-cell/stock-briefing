@@ -1,9 +1,7 @@
 name: 每日投资简报
 
 on:
-  # 保留手动触发和定时触发
   schedule:
-    # 北京时间早上8:00 (UTC 0:00)
     - cron: '0 0 * * *'
   workflow_dispatch:
 
@@ -11,11 +9,9 @@ jobs:
   run-briefing:
     runs-on: ubuntu-latest
     steps:
-    # 升级为最新的 v6 版本，支持 Node.js 24
     - uses: actions/checkout@v6
 
     - name: Set up Python
-      # 升级为最新的 v6 版本，支持 Node.js 24
       uses: actions/setup-python@v6
       with:
         python-version: '3.10'
