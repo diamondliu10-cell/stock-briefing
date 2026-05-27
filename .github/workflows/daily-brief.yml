@@ -1,8 +1,7 @@
 name: 每日投资简报
 
 on:
-  push:
-    branches: [main]
+  # 仅保留手动触发和定时触发，移除push触发器避免重复运行
   schedule:
     # 北京时间早上8:00 (UTC 0:00)
     - cron: '0 0 * * *'
