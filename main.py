@@ -10,7 +10,6 @@ from datetime import datetime, timezone, timedelta
 # ------------------------------------------------------------
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 def beijing_now():
@@ -24,7 +23,7 @@ def send_email(subject, body):
     password = os.environ.get("EMAIL_PASS")
     to_addr = os.environ.get("EMAIL_TO")
     if not user or not password or not to_addr:
-        print("错误：邮件凭证缺失")
+        print("邮件凭证缺失")
         return
     msg = MIMEMultipart()
     msg["From"] = user
@@ -42,7 +41,7 @@ def send_email(subject, body):
         print(f"邮件发送失败：{e}")
 
 def get_secid(code):
-    return f"0.{code}" if code.startswith("0") or code.startswith("3") else f"1.{code}"
+    return f"0.{code}" if code.startswith(("0", "3")) else f"1.{code}"
 
 def get_market_suffix(code):
     return "SZ" if code.startswith(("0", "3", "1")) else "SH"
@@ -59,7 +58,7 @@ def load_stocks():
                 if len(parts) >= 2:
                     stocks.append((parts[0].strip(), parts[1].strip()))
     except FileNotFoundError:
-        print("错误：找不到stocks.txt")
+        print("stocks.txt不存在")
     return stocks
 
 def format_amount(amount_yuan):
@@ -75,11 +74,7 @@ def format_amount(amount_yuan):
 # ------------------------------------------------------------
 def get_basic_em(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
-    params = {
-        "secid": secid,
-        "fields": "f43,f170,f48",
-        "ut": "fa5fd1943c7b386f172d6893dbf30c78"
-    }
+    params = {"secid": secid, "fields": "f43,f170,f48", "ut": "fa5fd1943c7b386f172d6893dbf30c78"}
     try:
         r = requests.get(url, params=params, timeout=5)
         data = r.json()["data"]
@@ -94,52 +89,39 @@ def get_basic_em(secid):
     return None
 
 def get_fund_flow(secid):
-    """
-    获取当日主力资金流向，使用最通用的日内资金流向接口。
-    返回：主力净流入（元）、主力净占比（%）
-    """
+    """使用新的资金接口，直接返回主力净流入和占比"""
     url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
         "secid": secid,
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56",
-        "lmt": 1,
-        "klt": 101,  # 日线
+        "lmt": 1, "klt": 101,
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     try:
         r = requests.get(url, params=params, timeout=5)
-        data = r.json()
-        klines = data.get("data", {}).get("klines", [])
+        klines = r.json().get("data", {}).get("klines", [])
         if klines:
             parts = klines[0].split(",")
-            main_in = float(parts[1]) if len(parts) > 1 else 0
+            main_in = float(parts[1]) if len(parts) > 1 else 0.0
             main_pct = float(parts[5]) / 100.0 if len(parts) > 5 else 0.0
             return {"main_net_in": main_in, "main_net_pct": main_pct}
     except Exception as e:
-        print(f"  资金流向获取异常：{e}")
+        print(f"  资金获取异常：{e}")
     return {"main_net_in": 0, "main_net_pct": 0.0}
 
 def get_notices(stock_code):
     url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-    params = {
-        "page_size": 3, "page_index": 1, "ann_type": "A",
-        "stock_list": stock_code, "f_node": 1, "s_node": 0
-    }
+    params = {"page_size": 3, "page_index": 1, "ann_type": "A", "stock_list": stock_code, "f_node": 1, "s_node": 0}
     try:
         r = requests.get(url, params=params, timeout=5)
-        items = r.json()["data"]["list"]
-        return [f"{item['notice_date'][:10]} {item['title']}" for item in items]
+        return [f"{item['notice_date'][:10]} {item['title']}" for item in r.json()["data"]["list"]]
     except:
         return []
 
 def get_stock_sentiment(code):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
-    params = {
-        "secid": get_secid(code),
-        "fields": "f12,f14,f92",
-        "ut": "fa5fd1943c7b386f172d6893dbf30c78"
-    }
+    params = {"secid": get_secid(code), "fields": "f12,f14,f92", "ut": "fa5fd1943c7b386f172d6893dbf30c78"}
     try:
         r = requests.get(url, params=params, timeout=5)
         rank = r.json().get("data", {}).get("f92")
@@ -156,11 +138,10 @@ def get_top_holders(code):
         "reportName": "RPT_F10_EH_HOLDERS",
         "columns": "HOLDER_NAME,HOLD_NUM_CHANGE,HOLD_NUM_RATIO,END_DATE",
         "filter": f'(SECUCODE="{code}.{suffix}")(IS_HOLDORG=1)',
-        "pageNumber": 1, "pageSize": 10,
-        "sortTypes": -1, "sortColumns": "END_DATE",
+        "pageNumber": 1, "pageSize": 10, "sortTypes": -1, "sortColumns": "END_DATE",
         "source": "HSF10", "client": "PC"
     }
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+    headers = {"Referer": "https://data.eastmoney.com/"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=8)
         data = r.json()
@@ -168,7 +149,7 @@ def get_top_holders(code):
             holders = data["result"].get("data", [])
             if holders:
                 latest_date = holders[0].get("END_DATE", "?")[:10]
-                lines = [f"（数据截止：{latest_date}）"]
+                lines = [f"（截止：{latest_date}）"]
                 for h in holders:
                     name = h.get("HOLDER_NAME", "")
                     if any(k in name for k in ["社保", "香港中央结算", "中国证券金融", "中央汇金"]):
@@ -177,15 +158,13 @@ def get_top_holders(code):
                         change_str = "增持" if change > 0 else ("减持" if change < 0 else "不变")
                         if ratio is not None:
                             lines.append(f"  • {name} 持股{ratio}%，{change_str}")
-                if len(lines) > 1:
-                    return lines
-                return ["（未发现重要机构）"]
+                return lines if len(lines) > 1 else ["（未发现重要机构）"]
     except:
         pass
     return ["（暂无最新数据）"]
 
 # ------------------------------------------------------------
-# 技术分析（全面加固）
+# 技术分析（核心修复：精确限制数据范围）
 # ------------------------------------------------------------
 def calculate_ma(values, window):
     if len(values) >= window:
@@ -222,12 +201,15 @@ def analyze_technical(code, name, secid):
         "ut": "fa5fd1943c7b386f172d6893dbf30c78",
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": 101, "fqt": 1, "end": "20500101", "lmt": 60
+        "klt": 101,
+        "fqt": 1,
+        "end": "20500101",
+        "lmt": 60
     }
     try:
         r = requests.get(url, params=params, timeout=5)
         klines = r.json()["data"]["klines"]
-        if not klines:
+        if not klines or len(klines) < 30:
             return "技术数据不足"
 
         closes, highs, lows, volumes = [], [], [], []
@@ -249,7 +231,6 @@ def analyze_technical(code, name, secid):
         volume = int(latest[5])
         change_pct = float(latest[8]) if len(latest) > 8 else 0
 
-        # 换手率稳健读取
         turnover = None
         try:
             if len(latest) > 10 and latest[10] and latest[10] != '-':
@@ -316,7 +297,7 @@ def analyze_technical(code, name, secid):
         return "技术数据解析失败"
 
 # ------------------------------------------------------------
-# 预测情报（个股专属）
+# 预测情报（彻底修复过滤逻辑）
 # ------------------------------------------------------------
 def get_predictive_intel(stock_code, stock_name):
     print(f"  获取 {stock_name} 情报...")
@@ -325,27 +306,18 @@ def get_predictive_intel(stock_code, stock_name):
     # 研报
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-        params = {
-            "page_size": 3, "page_index": 1,
-            "stock_list": stock_code,
-            "f_node": 2, "s_node": 0
-        }
+        params = {"page_size": 5, "page_index": 1, "stock_list": stock_code, "f_node": 2, "s_node": 0}
         r = requests.get(url, params=params, timeout=5)
         for item in r.json()["data"]["list"]:
             title = item.get("title", "")
-            if stock_name in title:
-                titles.append(f"[研报]{title}")
+            titles.append(f"[研报]{title}")
     except:
         pass
 
     # 预警公告
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
-        params = {
-            "page_size": 10, "page_index": 1,
-            "stock_list": stock_code,
-            "f_node": 1, "s_node": 0
-        }
+        params = {"page_size": 10, "page_index": 1, "stock_list": stock_code, "f_node": 1, "s_node": 0}
         r = requests.get(url, params=params, timeout=5)
         keywords = ["预测", "预警", "调出", "减持", "诉讼", "罚款", "下调", "目标价", "评级", "退市"]
         for item in r.json()["data"]["list"]:
@@ -509,7 +481,6 @@ def main():
                 body += f"  📊 成交 {format_amount(sd['amount'])}\n"
 
         body += f"  💵 主力：{format_amount(sd['main_net_in'])} (占比{sd['main_net_pct']:.2f}%)\n"
-
         body += f"  📈 技术：{sd.get('technical', '获取失败')}\n"
         body += f"  🗣️ 情绪：{sd.get('sentiment', '获取失败')}\n"
 
