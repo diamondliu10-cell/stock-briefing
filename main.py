@@ -3,13 +3,20 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # ------------------------------------------------------------
 # 基础配置
 # ------------------------------------------------------------
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# 北京时间时区
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+def beijing_now():
+    """获取当前北京时间"""
+    return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
 
 # ------------------------------------------------------------
 # 通用工具
@@ -66,7 +73,6 @@ def load_stocks():
     return stocks
 
 def format_amount(amount_yuan):
-    """智能单位转换：大于1亿显示亿，否则显示万"""
     if amount_yuan is None:
         return "0"
     yi = amount_yuan / 1e8
@@ -76,7 +82,7 @@ def format_amount(amount_yuan):
     return f"{wan:.0f}万元"
 
 # ------------------------------------------------------------
-# 1. 行情数据（东方财富 + 新浪备份）
+# 数据抓取模块
 # ------------------------------------------------------------
 def get_basic_em(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -120,9 +126,6 @@ def get_stock_basic(code, secid):
         return result
     return get_basic_sina(get_sina_code(code))
 
-# ------------------------------------------------------------
-# 2. 主力资金流向（东方财富）
-# ------------------------------------------------------------
 def get_fund_flow(secid):
     url = "https://push2.eastmoney.com/api/qt/stock/get"
     params = {
@@ -140,9 +143,6 @@ def get_fund_flow(secid):
     except:
         return {"main_net_in": 0, "main_net_pct": 0.0}
 
-# ------------------------------------------------------------
-# 3. 公告（东方财富）
-# ------------------------------------------------------------
 def get_notices(stock_code):
     url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
     params = {
@@ -157,17 +157,12 @@ def get_notices(stock_code):
     except:
         return []
 
-# ------------------------------------------------------------
-# 4. 个股资讯（东方财富，补充发布会等事件）
-# ------------------------------------------------------------
 def get_news(stock_code):
-    """抓取个股最新5条资讯标题，补充公告之外的事件信息"""
     url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
     params = {
         "page_size": 5, "page_index": 1,
         "stock_list": stock_code,
-        "f_node": 0,  # 0=全部, 1=公告, 2=研报
-        "s_node": 0
+        "f_node": 0, "s_node": 0
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -177,9 +172,6 @@ def get_news(stock_code):
     except:
         return []
 
-# ------------------------------------------------------------
-# 5. 个股市场情绪（东方财富人气榜排名）
-# ------------------------------------------------------------
 def get_stock_sentiment(code):
     secid = get_secid(code)
     url = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -199,9 +191,6 @@ def get_stock_sentiment(code):
     except:
         return "获取失败"
 
-# ------------------------------------------------------------
-# 6. 十大流通股东透视（社保/北向）
-# ------------------------------------------------------------
 def get_market_suffix(code):
     if code.startswith(("0", "3", "1")):
         return "SZ"
@@ -248,51 +237,189 @@ def get_top_holders(code):
         return None
 
 # ------------------------------------------------------------
+# 新增模块：个股技术面分析（日K、周K、量能、换手率）
+# ------------------------------------------------------------
+def get_kline_data(code, secid, period="daily", limit=20):
+    """获取日K或周K数据"""
+    # period: 101=日K, 102=周K
+    klt_map = {"daily": 101, "weekly": 102}
+    klt = klt_map.get(period, 101)
+    
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "ut": "fa5fd1943c7b386f172d6893dbf30c78",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "klt": klt,
+        "fqt": 1,  # 前复权
+        "end": "20500101",
+        "lmt": limit
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        data = r.json()
+        if data.get("data") and data["data"].get("klines"):
+            return data["data"]["klines"]
+        return []
+    except:
+        return []
+
+def analyze_technical(code, name, secid):
+    """分析个股技术面并返回文字摘要"""
+    # 获取日K（最近20个交易日）
+    daily_k = get_kline_data(code, secid, "daily", 20)
+    # 获取周K（最近10周）
+    weekly_k = get_kline_data(code, secid, "weekly", 10)
+    
+    if not daily_k:
+        return "技术数据获取失败"
+    
+    # 解析最新日K
+    last_day = daily_k[-1].split(",")  # 日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+    # 解析前一日日K
+    prev_day = daily_k[-2].split(",") if len(daily_k) >= 2 else None
+    
+    # 关键指标
+    date = last_day[0]
+    open_price = float(last_day[1])
+    close_price = float(last_day[2])
+    high = float(last_day[3])
+    low = float(last_day[4])
+    volume = int(last_day[5])
+    turnover_rate = float(last_day[10]) if len(last_day) > 10 else None
+    
+    # 涨跌幅
+    change_pct = float(last_day[8]) if len(last_day) > 8 else 0
+    
+    # 量能对比（与前一日比较）
+    if prev_day:
+        prev_volume = int(prev_day[5])
+        vol_change = ((volume - prev_volume) / prev_volume * 100) if prev_volume > 0 else 0
+        vol_desc = "放量" if vol_change > 20 else ("缩量" if vol_change < -20 else "量平")
+    else:
+        vol_change = 0
+        vol_desc = "量平"
+    
+    # 周K趋势简化判断
+    weekly_desc = "数据不足"
+    if len(weekly_k) >= 2:
+        last_week = weekly_k[-1].split(",")
+        prev_week = weekly_k[-2].split(",")
+        last_week_close = float(last_week[2])
+        prev_week_close = float(prev_week[2])
+        weekly_change = (last_week_close - prev_week_close) / prev_week_close * 100
+        if weekly_change > 3:
+            weekly_desc = f"周线趋势向上({weekly_change:+.2f}%)"
+        elif weekly_change < -3:
+            weekly_desc = f"周线趋势向下({weekly_change:+.2f}%)"
+        else:
+            weekly_desc = f"周线横盘({weekly_change:+.2f}%)"
+    
+    # 构建技术摘要
+    summary = f"日K：{date} | 开{open_price:.2f}/收{close_price:.2f} | 高{high:.2f}/低{low:.2f} | {vol_desc}（量变{vol_change:+.1f}%）"
+    if turnover_rate is not None:
+        summary += f" | 换手率{turnover_rate:.2f}%"
+    summary += f"\n  周K：{weekly_desc}"
+    
+    # 简单技术判断
+    if change_pct > 2 and vol_desc == "放量":
+        summary += " | 放量上涨，短线偏强"
+    elif change_pct < -2 and vol_desc == "放量":
+        summary += " | 放量下跌，短线偏弱"
+    elif abs(change_pct) < 1 and vol_desc == "缩量":
+        summary += " | 窄幅缩量整理"
+    
+    return summary
+
+# ------------------------------------------------------------
+# 宏观模块：市场热点板块与财经日历
+# ------------------------------------------------------------
+def get_hot_sectors():
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+    params = {
+        "fid": "f62",
+        "po": 1, "pz": 5, "pn": 1, "np": 1,
+        "fltt": 2, "invt": 2,
+        "fs": "m:90+t2",
+        "fields": "f12,f14,f62,f184,f3",
+        "ut": "fa5fd1943c7b386f172d6893dbf30c78"
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=5)
+        data = r.json().get("data", {}).get("diff", [])
+        if not data:
+            return "获取失败"
+        lines = []
+        for item in data:
+            name = item.get("f14", "?")
+            main_in = item.get("f62", 0) or 0
+            main_pct = (item.get("f184", 0) or 0) / 100.0
+            lines.append(f"{name}（主力净流入{main_in/1e8:.2f}亿，占比{main_pct:.2f}%）")
+        return "；\n  ".join(lines)
+    except:
+        return "获取失败"
+
+def get_finance_calendar():
+    return "暂无重要事件提醒（可后续接入专业财经日历API）"
+
+# ------------------------------------------------------------
 # AI 总结
 # ------------------------------------------------------------
-def generate_ai_summary(stocks_data):
+def generate_ai_summary(stocks_data, hot_sectors, calendar):
     if not DEEPSEEK_API_KEY:
         return "❌ 未设置 DEEPSEEK_API_KEY"
 
-    data_text = "【持仓股票数据】\n"
+    data_text = f"【今日市场热点板块】\n  {hot_sectors}\n\n"
+    data_text += f"【重要财经提醒】\n  {calendar}\n\n"
+    data_text += "【持仓股票数据（含技术面）】\n"
+    
     for sd in stocks_data:
-        data_text += f"\n{sd['name']}({sd['code']})："
+        data_text += f"\n{sd['name']}({sd['code']})：\n"
         if sd.get("price"):
-            data_text += f"现价{sd['price']}元，涨跌幅{sd['change_pct']}%"
+            data_text += f"  现价{sd['price']}元，涨跌幅{sd['change_pct']}%"
         if sd.get("amount"):
             data_text += f"，成交额{format_amount(sd['amount'])}；"
-        data_text += f"主力资金：{format_amount(sd['main_net_in'])}，占比{sd['main_net_pct']:.2f}%；"
+        data_text += f"主力资金：{format_amount(sd['main_net_in'])}，占比{sd['main_net_pct']:.2f}%；\n"
         if sd.get("sentiment"):
-            data_text += f"人气：{sd['sentiment']}；"
-        if sd.get("notices"):
-            data_text += f"公告：{'；'.join(sd['notices'])}；"
-        if sd.get("news"):
-            data_text += f"资讯：{'；'.join(sd['news'])}；"
+            data_text += f"  人气：{sd['sentiment']}；\n"
         if sd.get("holders_info") and sd["holders_info"] != ["（暂无最新股东数据）"]:
-            data_text += f"股东动向：{'；'.join(sd['holders_info'])}"
+            data_text += f"  股东动向：{'；'.join(sd['holders_info'])}；\n"
+        if sd.get("technical"):
+            data_text += f"  技术面：{sd['technical']}\n"
+        if sd.get("notices"):
+            data_text += f"  公告：{'；'.join(sd['notices'])}；\n"
+        if sd.get("news"):
+            data_text += f"  资讯：{'；'.join(sd['news'])}；"
 
-    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。根据以下数据，为每只股票生成简短判断（不超过60字），并用一句话总结整体账户风险。
+    prompt = f"""你是一位INTJ型投资分析师，冷静、客观、一针见血。
 
-重要规则：
-1. 公告中已包含“2026年一季报”的，请基于已有数据判断，不要说“等待一季报”。
-2. 资讯中包含“发布会”“业绩说明会”“重大合同”等事件的，请重点提及。
-3. 资金数据已智能显示单位（亿元/万元），请直接引用。
-4. 每只股票前标注🔴（风险）或🟢（积极）或➖（中性）。
-5. 最后单独一行给出整体风险总结。
+请结合【市场热点板块】、【重要财经提醒】和【个股数据（含技术面）】，为每只股票生成简短判断（不超过80字），并附上最多3条关联动态。
+
+要求：
+1. 每只股票格式为：
+   [股票名]：🔴/🟢/➖ 核心分析...
+   关联动态：1. 动态一；2. 动态二（只列与股票或所属板块直接相关的公告、资讯或市场热点）
+2. 技术面数据已提供，请在分析中融入关键技术信号（如放量/缩量、周线趋势等）。
+3. 如果你持仓的股票属于今日资金流入TOP5的板块，请重点指出。
+4. 公告和资讯中，如果已包含具体内容（如一季报），就基于已有信息分析，不要说"等待"。
+5. 最后单独一行，以"整体风险："开头，用一句话总结你持仓组合最需要关注的风险点。
 
 {data_text}
 
-请按以下格式输出：
-比亚迪：🔴/🟢/➖ 核心判断...
-（其他股票依次列出）
-整体风险：一句话总结。"""
+请直接按以下格式输出，不要加额外客套话：
+比亚迪：🔴/🟢/➖ ...
+关联动态：1. ...
+整体风险：..."""
 
     headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 800
+        "max_tokens": 1200
     }
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=25)
@@ -310,17 +437,23 @@ def main():
         send_email("股票简报 - 错误", "股票列表为空")
         return
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = beijing_now()  # 北京时间
 
+    # 1. 宏观视角
+    hot_sectors = get_hot_sectors()
+    calendar = get_finance_calendar()
+
+    # 2. 个股数据（含技术面）
     stocks_data = []
     for code, name in stocks:
         secid = get_secid(code)
         basic = get_stock_basic(code, secid)
         flow = get_fund_flow(secid)
         notices = get_notices(code)
-        news = get_news(code)  # 新增：个股资讯
+        news = get_news(code)
         sentiment = get_stock_sentiment(code)
         holders = get_top_holders(code)
+        technical = analyze_technical(code, name, secid)  # 新增技术分析
 
         stocks_data.append({
             "code": code, "name": name,
@@ -332,13 +465,19 @@ def main():
             "notices": notices,
             "news": news,
             "sentiment": sentiment,
-            "holders_info": holders
+            "holders_info": holders,
+            "technical": technical
         })
 
-    ai_summary = generate_ai_summary(stocks_data)
+    # 3. AI 分析
+    ai_summary = generate_ai_summary(stocks_data, hot_sectors, calendar)
 
-    body = f"📈 持仓全量智能简报 ({now})\n"
+    # 4. 构建邮件
+    body = f"📈 持仓智能深度简报 ({now} 北京时间)\n"
     body += "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    body += f"【🔥 今日资金热点板块】\n  {hot_sectors}\n\n"
+    body += f"【📅 重要财经提醒】\n  {calendar}\n\n"
 
     if ai_summary and not ai_summary.startswith("❌"):
         body += "【今日核心判断（AI生成）】\n"
@@ -365,6 +504,11 @@ def main():
             body += f"  💰 行情获取异常（已尝试东方财富及新浪）\n"
 
         body += f"  💵 主力资金：净流入 {format_amount(sd['main_net_in'])} (占比 {sd['main_net_pct']:.2f}%)\n"
+        
+        # 技术面
+        if sd.get("technical"):
+            body += f"  📈 技术面：{sd['technical']}\n"
+        
         body += f"  📈 市场情绪：{sd.get('sentiment', '获取失败')}\n"
 
         body += f"  🔍 重要股东动向（社保/北向）:\n"
@@ -376,18 +520,6 @@ def main():
             body += f"    （当期十大流通股东中未发现社保/北向持仓）\n"
         else:
             body += f"    （暂无最新股东数据）\n"
-
-        if sd.get("notices"):
-            body += f"  📰 最新公告：\n"
-            for n in sd['notices']:
-                body += f"    • {n}\n"
-        else:
-            body += f"  📰 最新公告：无\n"
-
-        if sd.get("news"):
-            body += f"  📰 最新资讯：\n"
-            for n in sd['news']:
-                body += f"    • {n}\n"
 
     body += "\n━━━━━━━━━━━━━━━━━━━━\n"
     body += "数据来源：东方财富、新浪财经 | 分析：DeepSeek AI | 本简报不构成投资建议，请独立决策。"
