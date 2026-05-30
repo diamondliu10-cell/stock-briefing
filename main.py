@@ -4,9 +4,18 @@ import os
 import time
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
+from email.mime.base import MIMEBase
+from email import encoders
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
+import base64
 
 # ------------------------------------------------------------
 # 基础配置
@@ -18,18 +27,29 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 def beijing_now():
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
 
-def send_email(subject, body):
+def send_email(subject, html_body, img_data):
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     to_addr = os.environ.get("EMAIL_TO")
     if not user or not password or not to_addr:
         print("邮件凭证缺失")
         return
-    msg = MIMEMultipart()
+    msg = MIMEMultipart('related')
     msg["From"] = user
     msg["To"] = to_addr
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    # 添加HTML正文
+    msg_alt = MIMEMultipart('alternative')
+    msg.attach(msg_alt)
+    msg_alt.attach(MIMEText(html_body, 'html', 'utf-8'))
+
+    # 添加图片附件（作为内嵌图片）
+    img = MIMEImage(img_data, _subtype="png")
+    img.add_header('Content-ID', '<briefing_chart>')
+    img.add_header('Content-Disposition', 'inline', filename='briefing.png')
+    msg.attach(img)
+
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
@@ -90,7 +110,6 @@ def robust_get(func, *args, retries=2, delay=10, **kwargs):
     return None
 
 def get_kline_data(code, count=1):
-    """获取日K线，返回DataFrame"""
     secid = get_secid(code)
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
@@ -98,10 +117,7 @@ def get_kline_data(code, count=1):
         "ut": "fa5fd1943c7b386f172d6893dbf30c78",
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62",
-        "klt": 101,
-        "fqt": 1,
-        "end": "20500101",
-        "lmt": count
+        "klt": 101, "fqt": 1, "end": "20500101", "lmt": count
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -120,15 +136,14 @@ def get_kline_data(code, count=1):
         return None
 
 def get_fund_flow_multi(code, days=20):
-    """获取最近N日主力净流入（元）"""
+    """获取最近N日主力净流入列表（按日期升序，最后一个为最新）"""
     secid = get_secid(code)
     url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
     params = {
         "secid": secid,
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56",
-        "lmt": days,
-        "klt": 101,
+        "lmt": days, "klt": 101,
         "ut": "fa5fd1943c7b386f172d6893dbf30c78"
     }
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -137,31 +152,33 @@ def get_fund_flow_multi(code, days=20):
         klines = r.json()["data"]["klines"]
         if not klines:
             return []
-        return [float(k.split(",")[1]) for k in klines if len(k.split(",")) > 1]
+        flows = []
+        for k in klines:
+            parts = k.split(",")
+            if len(parts) > 1:
+                flows.append(float(parts[1]))
+        return flows  # 日期升序
     except:
         return []
 
 def get_news(stock_code):
-    """获取个股近期新闻标题（尽量抓取更多）"""
     url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
     params = {
-        "page_size": 10,
-        "page_index": 1,
+        "page_size": 8, "page_index": 1,
         "stock_list": stock_code,
-        "f_node": 0,
-        "s_node": 0
+        "f_node": 0, "s_node": 0
     }
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         r = requests.get(url, params=params, headers=headers, timeout=8)
         items = r.json()["data"]["list"]
         titles = [f"{item['notice_date'][:10]} {item['title']}" for item in items]
-        return titles[:8]  # 最多8条
+        return titles[:6]
     except:
         return []
 
 # ------------------------------------------------------------
-# AI 分析（深度增强）
+# AI 分析（消息来源明确）
 # ------------------------------------------------------------
 def call_deepseek(prompt):
     if not DEEPSEEK_API_KEY:
@@ -197,11 +214,11 @@ def generate_analysis(stocks_data):
         data_text += f"主力资金净流入：5日{format_amount(flows.get('5d',0))}，10日{format_amount(flows.get('10d',0))}，20日{format_amount(flows.get('20d',0))}\n"
         news = sd.get("news", [])
         if news:
-            data_text += "近期消息：\n"
+            data_text += "近期消息（来源：东方财富）：\n"
             for n in news[:5]:
                 data_text += f"  · {n}\n"
         else:
-            data_text += "近期消息：无\n"
+            data_text += "无近期消息\n"
         if sd.get("profit_str"):
             data_text += f"持仓盈亏：{sd['profit_str']}\n"
         data_text += "\n"
@@ -209,19 +226,64 @@ def generate_analysis(stocks_data):
     prompt = f"""你是一位资深投资分析师，请基于以下每只股票的真实数据，撰写一份专业投资简报。必须包含两个部分：
 
 【一、⚠️ 风险提示】
-- 用🔴标记存在明显风险的个股，说明风险原因（如技术破位、资金持续流出、重大利空消息等）。
+- 用🔴标记存在明显风险的个股，说明风险原因（如技术破位、资金持续流出、重大利空消息等），并引用具体的消息标题。
 - 若无明确风险，则写“今日无特别风险提示”。
 
 【二、📊 个股深度分析】
 对每只股票，结合日K线形态、主力资金多日流向、近期消息面，给出：
 - 技术面评估（趋势、支撑压力、量价关系）
 - 资金面评估（主力动向、多日净额变化）
-- 消息面解读（判断利好/利空，引用消息标题）
+- 消息面解读（明确判断利好/利空，引用消息标题，并注明来源“东方财富”）
 - 操作建议（持有/加仓/减仓/观望）并简述理由
 每只股票分析篇幅4-5行，观点明确，不模棱两可。
 
 {data_text}"""
     return call_deepseek(prompt)
+
+# ------------------------------------------------------------
+# 生成图片简报
+# ------------------------------------------------------------
+def create_chart(stocks_data):
+    # 设置中文字体
+    font_path = '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc'
+    if not os.path.exists(font_path):
+        font_path = fm.findfont(fm.FontProperties(family='WenQuanYi Zen Hei'))
+    zh_font = fm.FontProperties(fname=font_path, size=10)
+
+    # 准备数据
+    names = [d['name'] for d in stocks_data]
+    prices = [f"{d['price']:.2f}" if d.get('price') else "N/A" for d in stocks_data]
+    changes = [f"{d.get('change_pct', 0):+.2f}%" if d.get('change_pct') is not None else "N/A" for d in stocks_data]
+    fund_5d = [format_amount(d['fund_flows'].get('5d',0)) for d in stocks_data]
+    fund_20d = [format_amount(d['fund_flows'].get('20d',0)) for d in stocks_data]
+
+    # 创建图表
+    fig, ax = plt.subplots(figsize=(8, len(names)*0.6 + 1.5))
+    ax.axis('off')
+
+    # 标题
+    ax.text(0.5, 0.95, f"📈 投资简报 {beijing_now()}", transform=ax.transAxes,
+            ha='center', fontsize=14, fontproperties=zh_font, weight='bold')
+
+    # 表头
+    cols = ["股票", "现价", "涨跌幅", "主力5日", "主力20日"]
+    col_widths = [0.2, 0.15, 0.15, 0.25, 0.25]
+    x_pos = [0.05 + sum(col_widths[:i]) for i in range(len(cols))]
+    for i, col in enumerate(cols):
+        ax.text(x_pos[i], 0.85, col, fontsize=9, fontproperties=zh_font, weight='bold')
+
+    # 数据行
+    for j, row in enumerate(zip(names, prices, changes, fund_5d, fund_20d)):
+        y = 0.75 - j * 0.08
+        for i, val in enumerate(row):
+            ax.text(x_pos[i], y, val, fontsize=9, fontproperties=zh_font)
+
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+    plt.close()
+    buf.seek(0)
+    return buf.read()
 
 # ------------------------------------------------------------
 # 主流程
@@ -230,7 +292,7 @@ def main():
     print(f"简报开始 - {beijing_now()}")
     stocks = load_stocks()
     if not stocks:
-        send_email("股票简报 - 错误", "股票列表为空")
+        send_email("股票简报 - 错误", "图片生成失败", b"")
         return
 
     now = beijing_now()
@@ -238,9 +300,8 @@ def main():
 
     for code, name, cost in stocks:
         print(f"处理：{name}({code})")
-        # 带重试获取数据
         kline_df = robust_get(get_kline_data, code, count=1, retries=2, delay=10)
-        fund_flows = robust_get(get_fund_flow_multi, code, days=20, retries=2, delay=10)
+        fund_flows = robust_get(get_fund_flow_multi, code, days=20, retries=2, delay=10) or []
         news = robust_get(get_news, code, retries=1, delay=5) or []
 
         yest_kline = None
@@ -259,21 +320,18 @@ def main():
             price = last["close"]
             change_pct = last["pct_chg"] if pd.notna(last["pct_chg"]) else 0.0
 
-        # 资金汇总
-        fund_summary = {}
-        if fund_flows:
-            if len(fund_flows) >= 5:
-                fund_summary["5d"] = sum(fund_flows[-5:])
-            else:
-                fund_summary["5d"] = sum(fund_flows)
-            if len(fund_flows) >= 10:
-                fund_summary["10d"] = sum(fund_flows[-10:])
-            else:
-                fund_summary["10d"] = fund_summary["5d"]
-            if len(fund_flows) >= 20:
-                fund_summary["20d"] = sum(fund_flows)
-            else:
-                fund_summary["20d"] = fund_summary["10d"]
+        # 资金流向汇总（根据实际天数计算5/10/20日，防止数据不足）
+        def safe_sum(lst, n):
+            if len(lst) >= n:
+                return sum(lst[-n:])
+            elif lst:
+                return sum(lst)  # 不足则返回全部
+            return 0
+        fund_summary = {
+            "5d": safe_sum(fund_flows, 5),
+            "10d": safe_sum(fund_flows, 10),
+            "20d": safe_sum(fund_flows, 20)
+        }
 
         profit_str = ""
         if price and cost:
@@ -289,31 +347,32 @@ def main():
             "profit_str": profit_str
         })
 
-    # 生成AI分析
+    # 生成图片
+    print("生成图片简报...")
+    img_data = create_chart(stocks_data)
+
+    # 生成AI文字分析
     print("请求DeepSeek深度分析...")
     ai_analysis = generate_analysis(stocks_data)
 
-    # 构建邮件正文（优化排版）
-    body = f"📈 投资简报 | {now}\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += ai_analysis if ai_analysis else "AI分析生成失败"
-    body += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += "【📋 今日关键数据速览】\n"
-    for sd in stocks_data:
-        body += f"\n🔹 {sd['name']}（{sd['code']}）\n"
-        if sd.get("price"):
-            body += f"   现价 {sd['price']:.2f}元 | 涨跌 {sd['change_pct']:+.2f}%"
-            if sd.get("yest_kline"):
-                body += f" | 换手率 {sd['yest_kline']['turnover']:.2f}%"
-            body += "\n"
-        flows = sd.get("fund_flows", {})
-        body += f"   主力资金：5日 {format_amount(flows.get('5d',0))} | 10日 {format_amount(flows.get('10d',0))} | 20日 {format_amount(flows.get('20d',0))}\n"
-        if sd.get("profit_str"):
-            body += f"   持仓盈亏：{sd['profit_str']}\n"
-    body += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += "数据源：东方财富、新浪财经 | 分析：DeepSeek AI | 仅供参考，不构成投资建议。"
+    # 构建HTML邮件（图片嵌入）
+    img_base64 = base64.b64encode(img_data).decode('utf-8')
+    html_body = f"""
+    <html>
+    <body style="font-family: 'Microsoft YaHei', sans-serif;">
+        <h2>📈 投资简报 | {now}</h2>
+        <p><strong>AI 深度分析：</strong></p>
+        <pre style="white-space: pre-wrap; font-family: inherit;">{ai_analysis}</pre>
+        <hr>
+        <h3>📊 关键数据一览</h3>
+        <img src="cid:briefing_chart" alt="简报图表" style="max-width: 100%;">
+        <p style="font-size: small; color: gray;">数据源：东方财富、新浪财经 | 分析：DeepSeek AI | 仅供参考，不构成投资建议。</p>
+    </body>
+    </html>
+    """
 
-    send_email(f"📈 投资简报 {now}", body)
+    # 发送邮件
+    send_email(f"📈 投资简报 {now}", html_body, img_data)
     print("简报发送完毕")
 
 if __name__ == "__main__":
