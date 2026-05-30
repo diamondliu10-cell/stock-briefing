@@ -75,14 +75,46 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# DeepSeek 联网搜索（不要求链接，只要求标题+来源+判断）
+# 真实链接查找
+# ------------------------------------------------------------
+def fetch_real_link(title):
+    """用 DeepSeek 联网搜索，根据消息标题获取真实链接"""
+    if not DEEPSEEK_API_KEY:
+        return None
+    prompt = f"""请联网搜索以下消息的原文链接，必须返回真实存在的、可点击的完整URL。如果找到多个结果，请优先选择来自巨潮资讯、深交所、上交所、证券时报、东方财富网的链接。
+
+消息标题：{title}
+
+要求：
+1. 只输出链接，不要任何额外文字
+2. 如果未找到真实链接，输出：无
+3. 链接必须以 http:// 或 https:// 开头"""
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 200,
+        "search": True
+    }
+    try:
+        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
+        resp.raise_for_status()
+        link = resp.json()["choices"][0]["message"]["content"].strip()
+        if link.startswith("http"):
+            return link
+        return None
+    except:
+        return None
+
+# ------------------------------------------------------------
+# DeepSeek 联网搜索（获取消息列表）
 # ------------------------------------------------------------
 def search_stock_news(code, name, report_date):
     if not DEEPSEEK_API_KEY:
         return "❌ API Key未配置"
 
     start_date = (datetime.now(BEIJING_TZ) - timedelta(days=7)).strftime("%Y-%m-%d")
-    
     prompt = f"""今天是 {report_date}。请严格搜索 {name}（股票代码 {code}）在 {start_date} 至 {report_date} 期间的所有重要公告、新闻、监管信息。
 
 必须按照以下格式逐条输出（每条单独一行，最多6条）：
@@ -94,10 +126,7 @@ def search_stock_news(code, name, report_date):
 3. 如果搜索功能无法使用，回复：搜索不可用
 4. 只输出上述格式的内容，不要添加任何解释性开头语或结尾语"""
 
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
@@ -105,48 +134,46 @@ def search_stock_news(code, name, report_date):
         "max_tokens": 2000,
         "search": True
     }
-
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
-        result = resp.json()["choices"][0]["message"]["content"].strip()
-        return result
+        return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"搜索失败：{str(e)}"
 
 # ------------------------------------------------------------
-# 为每条消息生成百度搜索链接
+# 为每条消息添加真实链接或百度兜底链接
 # ------------------------------------------------------------
-def add_search_link(msg_block):
-    """给每条消息添加百度搜索链接"""
+def enrich_with_links(msg_block):
+    """给每条消息尝试获取真实链接，失败则使用百度搜索链接"""
     lines = msg_block.split('\n')
     new_lines = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith('🔍'):
             continue
-        # 提取标题（在 → 之前的部分，去除日期和来源）
         if '→' in line:
-            # 格式: [日期] [来源] 标题 → 判断
             title_part = line.split('→')[0].strip()
-            # 去掉前两个方括号里的内容
+            # 提取标题（去除前面的日期和来源）
             if '] [' in title_part:
-                title_start = title_part.find('] [') + 2
-                title_end = title_part.find('] ', title_start)
-                if title_end != -1:
-                    title = title_part[title_end+2:].strip()
+                idx = title_part.find('] [')
+                idx_end = title_part.find('] ', idx+2)
+                if idx_end != -1:
+                    title = title_part[idx_end+2:].strip()
                 else:
-                    title = title_part[title_start+1:].strip()
+                    title = title_part
             else:
-                # 异常情况，直接取 → 前面的
                 title = title_part
+
+            new_lines.append(line)
             if title:
-                encoded = urllib.parse.quote(title)
-                search_link = f"🔍 百度搜索：https://www.baidu.com/s?wd={encoded}"
-                new_lines.append(line)
-                new_lines.append(search_link)
-            else:
-                new_lines.append(line)
+                # 尝试获取真实链接
+                real_link = fetch_real_link(title)
+                if real_link:
+                    new_lines.append(f"🔗 原文链接：{real_link}")
+                else:
+                    encoded = urllib.parse.quote(title)
+                    new_lines.append(f"🔍 百度搜索：https://www.baidu.com/s?wd={encoded}")
         else:
             new_lines.append(line)
     return '\n'.join(new_lines)
@@ -165,10 +192,9 @@ def generate_image(stocks_data, report_date):
 
     total_lines = 0
     for sd in stocks_data:
-        total_lines += 1  # 股票名
-        lines = sd["result"].split('\n')
-        total_lines += len(lines)
-        total_lines += 1  # 空行
+        total_lines += 1
+        total_lines += sd["result"].count('\n') + 1
+        total_lines += 1
 
     fig_height = max(14, total_lines * 0.45 + 5)
     fig, ax = plt.subplots(figsize=(14, fig_height), facecolor='#F4F6F9')
@@ -216,7 +242,7 @@ def generate_image(stocks_data, report_date):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith('🔍'):
+            if line.startswith('🔗') or line.startswith('🔍'):
                 if len(line) > 120:
                     line = line[:117] + '...'
                 ax.text(0.14, y_pos/fig_height, line, transform=ax.transAxes,
@@ -266,11 +292,11 @@ def main():
     for code, name in stocks:
         print(f"搜索：{name}({code})")
         raw = search_stock_news(code, name, report_date)
-        # 为消息添加百度搜索链接
-        enriched = add_search_link(raw)
+        # 为消息添加真实链接（或百度兜底）
+        enriched = enrich_with_links(raw)
         stocks_data.append({"name": name, "code": code, "result": enriched})
 
-    # 生成文字版
+    # 文字版简报
     text_body = f"📈 每日消息简报 | {now}\n"
     text_body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     risk_list = []
@@ -286,7 +312,7 @@ def main():
     for sd in stocks_data:
         text_body += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
     text_body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    text_body += "🔍 点击搜索链接即可查看原文 | 数据源：DeepSeek 联网搜索 | 仅供参考"
+    text_body += "🔗 真实原文链接 | 🔍 百度兜底搜索 | 数据源：DeepSeek 联网搜索 | 仅供参考"
 
     img_data = generate_image(stocks_data, report_date)
 
@@ -321,7 +347,7 @@ def main():
             for sd in new_data:
                 new_text += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
             new_text += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            new_text += "🔍 点击搜索链接即可查看原文 | 数据源：DeepSeek 联网搜索 | 仅供参考"
+            new_text += "🔗 真实原文链接 | 🔍 百度兜底搜索 | 数据源：DeepSeek 联网搜索 | 仅供参考"
             new_img = generate_image(new_data, report_date)
             send_email(f"📈 午间消息更新 {now}", new_text, new_img)
             print("下午新增简报已发送")
