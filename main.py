@@ -126,9 +126,9 @@ def get_kline_data(code):
     return None
 
 def compute_technical(df):
-    """计算技术指标"""
+    """计算技术指标，返回 (风险标志, 简短技术概要, 技术详情, 错误信息)"""
     if df is None or df.empty:
-        return None, None, None, "获取失败"
+        return "➖", "获取失败", "获取失败", "数据不足"
     closes = df["close"].values
     highs = df["high"].values
     lows = df["low"].values
@@ -188,9 +188,15 @@ def compute_technical(df):
     support = f"{min(lows[-20:]):.2f}" if len(lows) >= 20 else "?"
     resistance = f"{max(highs[-20:]):.2f}" if len(highs) >= 20 else "?"
 
-    tech_summary = f"{trend} | MACD:{'红柱' if (dif and macd_val and dif > 0 and macd_val > 0) else '绿柱' if (dif and macd_val and dif < 0 and macd_val < 0) else '不明'} | RSI:{rsi_val:.0f}" if rsi_val else f"{trend} | RSI:?"
+    # 简短技术概要（用于仪表盘显示）
+    if dif and macd_val:
+        macd_str = "红柱" if dif > 0 and macd_val > 0 else "绿柱"
+    else:
+        macd_str = "不明"
+    rsi_str = f"RSI:{rsi_val:.0f}" if rsi_val else "RSI:?"
+    tech_summary = f"{trend} | MACD:{macd_str} | {rsi_str}"
 
-    # 详细技术字符串，留给AI分析用
+    # 详细技术细节（用于AI总结）
     detail = f"趋势{trend}，"
     if ma5:
         detail += f"MA5={ma5:.2f} MA10={ma10:.2f} MA20={ma20:.2f}，"
@@ -208,22 +214,21 @@ def compute_technical(df):
     elif "多头" in trend:
         risk_flag = "🟢"
 
-    return risk_flag, tech_summary, detail, None  # 无错误
+    return risk_flag, tech_summary, detail, None
 
 def get_intelligence(code):
     # 暂时保留，后续可接入新闻API
     return []
 
 # ------------------------------------------------------------
-# AI 总结（保留，生成顶部一句话风险判断）
+# AI 总结（生成顶部一句话风险判断）
 # ------------------------------------------------------------
 def generate_risk_summary(stocks_data):
     if not DEEPSEEK_API_KEY:
         return "AI未配置"
-    # 构建简要数据
     data_text = ""
     for sd in stocks_data:
-        data_text += f"{sd['name']}: 涨跌{sd['change_pct']}%, 趋势{sd['trend']}, 主力{format_amount(sd['amount'])}, 技术{sd['tech_detail']}\n"
+        data_text += f"{sd['name']}: 涨跌{sd.get('change_pct', 0):+.1f}%, 趋势{sd.get('trend', '→')}, 成交{format_amount(sd.get('amount', 0))}, 技术{sd.get('tech_detail', '无')}\n"
     prompt = f"""根据以下持仓简况，用一句话（不超过40字）总结整体风险，并给出一个风险等级（低/中/高）。格式：🟢/🟡/🔴 风险等级 简要总结。
 {data_text}
 """
@@ -264,11 +269,14 @@ def main():
         change_pct = quote["change_pct"] if quote else None
         amount = quote["amount"] if quote else None
 
-        # 计算盈亏
+        # 盈亏计算
         profit_str = ""
         if price and cost:
             profit_pct = (price - cost) / cost * 100
             profit_str = f" | 成本{cost:.2f} 盈亏{profit_pct:+.1f}%"
+
+        # 从tech_summary提取趋势文字
+        trend_text = tech_summary.split("|")[0].strip() if tech_summary else "→横盘"
 
         stocks_data.append({
             "name": name,
@@ -278,6 +286,7 @@ def main():
             "amount": amount,
             "risk_flag": risk_flag,
             "tech_summary": tech_summary,
+            "trend": trend_text,
             "tech_detail": tech_detail,
             "profit_str": profit_str,
             "intel": get_intelligence(code)
