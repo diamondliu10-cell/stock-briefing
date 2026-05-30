@@ -2,10 +2,8 @@ name: 每日消息简报
 
 on:
   schedule:
-    # 北京时间上午 8:30 (UTC 0:30)
-    - cron: '30 0 * * *'
-    # 北京时间下午 14:10 (UTC 6:10)
-    - cron: '10 6 * * *'
+    - cron: '30 0 * * *'   # 北京时间 8:30
+    - cron: '10 6 * * *'   # 北京时间 14:10
   workflow_dispatch:
 
 jobs:
@@ -20,9 +18,8 @@ jobs:
         python-version: '3.10'
 
     - name: Install dependencies
-      run: pip install requests beautifulsoup4
+      run: pip install requests
 
-    # 尝试下载上午保存的消息文件
     - name: Download morning messages
       uses: actions/download-artifact@v4
       with:
@@ -36,12 +33,11 @@ jobs:
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
         EMAIL_TO: ${{ secrets.EMAIL_TO }}
         DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        MORNING_DATA_PATH: morning_data/morning_news.json   # 若存在则下午模式
+        MORNING_DATA_PATH: morning_data/morning_news.json
       run: python main.py
 
-    # 上午运行后会生成 morning_news.json，上传为 artifact 供下午使用
     - name: Upload morning messages
-      if: success() && hashFiles('morning_news.json') != ''
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: morning-news
