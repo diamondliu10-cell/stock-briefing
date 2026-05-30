@@ -16,11 +16,14 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install dependencies
+    - name: Install system dependencies & fonts
       run: |
-        pip install requests
-        pip install pandas
-        pip install numpy
+        sudo apt-get update
+        sudo apt-get install -y fonts-wqy-zenhei
+
+    - name: Install Python dependencies
+      run: |
+        pip install requests pandas numpy matplotlib
 
     - name: Run briefing script
       env:
