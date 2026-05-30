@@ -2,7 +2,7 @@ name: 每日投资简报
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 0 * * *'  # 北京时间早上8:00
   workflow_dispatch:
 
 jobs:
@@ -16,14 +16,9 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install system dependencies & fonts
+    - name: Install dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y fonts-wqy-zenhei
-
-    - name: Install Python dependencies
-      run: |
-        pip install requests pandas numpy matplotlib
+        pip install requests beautifulsoup4
 
     - name: Run briefing script
       env:
