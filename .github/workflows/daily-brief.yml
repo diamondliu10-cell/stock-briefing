@@ -17,17 +17,22 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install dependencies
-      run: pip install requests
+    - name: Install system deps & fonts
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fonts-wqy-zenhei
 
-    - name: Download morning messages
+    - name: Install Python deps
+      run: pip install requests matplotlib
+
+    - name: Download morning cache
       uses: actions/download-artifact@v4
       with:
         name: morning-news
         path: morning_data
       continue-on-error: true
 
-    - name: Run briefing script
+    - name: Run briefing
       env:
         EMAIL_USER: ${{ secrets.EMAIL_USER }}
         EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
@@ -36,7 +41,7 @@ jobs:
         MORNING_DATA_PATH: morning_data/morning_news.json
       run: python main.py
 
-    - name: Upload morning messages
+    - name: Upload morning cache
       if: success()
       uses: actions/upload-artifact@v4
       with:
