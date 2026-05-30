@@ -40,7 +40,6 @@ def send_email(subject, body):
         print(f"邮件发送失败：{e}")
 
 def load_stocks():
-    """读取stocks.txt，支持可选成本价"""
     stocks = []
     try:
         with open("stocks.txt", "r", encoding="utf-8") as f:
@@ -67,184 +66,157 @@ def format_amount(amount_yuan):
     wan = amount_yuan / 1e4
     return f"{wan:.0f}万"
 
-def get_sina_code(code):
-    if code.startswith(("6", "5", "9")):
-        return f"sh{code}"
+# ------------------------------------------------------------
+# 数据获取函数
+# ------------------------------------------------------------
+def get_secid(code):
+    """获取东方财富secid"""
+    if code.startswith(("0", "3")):
+        return f"0.{code}"
     else:
-        return f"sz{code}"
+        return f"1.{code}"
 
-# ------------------------------------------------------------
-# 数据获取
-# ------------------------------------------------------------
-def get_realtime_quote(code):
-    """新浪实时行情"""
+def get_kline_data(code, count=1):
+    """获取日K线数据，返回DataFrame，包含前一日行情"""
+    secid = get_secid(code)
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "ut": "fa5fd1943c7b386f172d6893dbf30c78",
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62",
+        "klt": 101,       # 日K
+        "fqt": 1,         # 前复权
+        "end": "20500101",
+        "lmt": count
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        sina_code = get_sina_code(code)
-        url = f"https://hq.sinajs.cn/list={sina_code}"
-        headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn"}
-        resp = requests.get(url, headers=headers, timeout=5)
-        resp.encoding = "gb2312"
-        data_str = resp.text.split('"')[1]
-        if not data_str:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()["data"]
+        if data is None:
             return None
-        parts = data_str.split(",")
-        if len(parts) < 30:
+        klines = data["klines"]
+        if not klines:
             return None
-        return {
-            "price": float(parts[3]),
-            "change_pct": round((float(parts[3]) - float(parts[2])) / float(parts[2]) * 100, 2),
-            "high": float(parts[4]),
-            "low": float(parts[5]),
-            "amount": float(parts[9]) if len(parts) > 9 else 0.0,
-            "volume": float(parts[8]) if len(parts) > 8 else 0.0,
-            "open": float(parts[1]),
-            "prev_close": float(parts[2]),
-            "date": parts[30] if len(parts) > 30 else "?"
-        }
-    except Exception as e:
-        print(f"行情获取异常 {code}: {e}")
-    return None
-
-def get_kline_data(code):
-    """新浪历史日K"""
-    try:
-        sina_code = get_sina_code(code)
-        url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=60"
-        resp = requests.get(url, timeout=10)
-        data = resp.json()
-        if not data:
-            return None
-        df = pd.DataFrame(data)
-        df["close"] = pd.to_numeric(df["close"])
-        df["high"] = pd.to_numeric(df["high"])
-        df["low"] = pd.to_numeric(df["low"])
-        df["volume"] = pd.to_numeric(df["volume"])
-        df["open"] = pd.to_numeric(df["open"])
+        df = pd.DataFrame([k.split(",") for k in klines],
+                          columns=["date","open","close","high","low","volume","amount",
+                                   "amp","pct_chg","chg","turnover","main_net_in"])
+        for col in ["open","close","high","low","volume","amount","turnover","main_net_in","pct_chg"]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
     except Exception as e:
         print(f"K线获取异常 {code}: {e}")
-    return None
+        return None
 
-def compute_technical(df):
-    """计算技术指标，返回 (风险标志, 简短技术概要, 技术详情, 错误信息)"""
-    if df is None or df.empty:
-        return "➖", "获取失败", "获取失败", "数据不足"
-    closes = df["close"].values
-    highs = df["high"].values
-    lows = df["low"].values
-    volumes = df["volume"].values
+def get_fund_flow_multi(code, days=20):
+    """获取最近N日主力资金净流入明细"""
+    secid = get_secid(code)
+    url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56",
+        "lmt": days,
+        "klt": 101,
+        "ut": "fa5fd1943c7b386f172d6893dbf30c78"
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        klines = r.json()["data"]["klines"]
+        if not klines:
+            return None
+        flows = []
+        for k in klines:
+            parts = k.split(",")
+            if len(parts) >= 2:
+                flows.append(float(parts[1]))  # 主力净流入
+        return flows
+    except Exception as e:
+        print(f"资金流向获取异常 {code}: {e}")
+        return None
 
-    last_close = closes[-1]
-    last_open = df["open"].iloc[-1]
-    last_high = highs[-1]
-    last_low = lows[-1]
-    last_vol = volumes[-1]
-
-    # 涨跌幅（相对前一交易日）
-    change_pct = (closes[-1] - closes[-2]) / closes[-2] * 100 if len(closes) > 1 else 0
-
-    # 均线
-    ma5 = np.mean(closes[-5:]) if len(closes) >= 5 else None
-    ma10 = np.mean(closes[-10:]) if len(closes) >= 10 else None
-    ma20 = np.mean(closes[-20:]) if len(closes) >= 20 else None
-
-    # 量能变化
-    if len(volumes) > 1:
-        vol_change = (volumes[-1] - volumes[-2]) / volumes[-2] * 100
-        vol_desc = "放量" if vol_change > 20 else ("缩量" if vol_change < -20 else "量平")
-    else:
-        vol_change = 0
-        vol_desc = "量平"
-
-    # MACD
-    dif, macd_val = None, None
-    if len(closes) >= 26:
-        ema12 = pd.Series(closes).ewm(span=12, adjust=False).mean().iloc[-1]
-        ema26 = pd.Series(closes).ewm(span=26, adjust=False).mean().iloc[-1]
-        dif = ema12 - ema26
-        dea = pd.Series([dif] * 9).ewm(span=9, adjust=False).mean().iloc[-1]  # 简化处理
-        macd_val = (dif - dea) * 2
-
-    # RSI
-    rsi_val = None
-    if len(closes) >= 15:
-        delta = np.diff(closes[-15:])
-        gain = np.sum(delta[delta > 0])
-        loss = -np.sum(delta[delta < 0])
-        if loss == 0:
-            rsi_val = 100.0
-        else:
-            rsi_val = 100.0 - (100.0 / (1 + gain / loss))
-
-    # 趋势判断
-    trend = "→横盘"
-    if ma5 and ma10 and ma20:
-        if last_close > ma5 > ma10 > ma20:
-            trend = "↑多头"
-        elif last_close < ma5 < ma10 < ma20:
-            trend = "↓空头"
-
-    # 支撑/压力
-    support = f"{min(lows[-20:]):.2f}" if len(lows) >= 20 else "?"
-    resistance = f"{max(highs[-20:]):.2f}" if len(highs) >= 20 else "?"
-
-    # 简短技术概要（用于仪表盘显示）
-    if dif and macd_val:
-        macd_str = "红柱" if dif > 0 and macd_val > 0 else "绿柱"
-    else:
-        macd_str = "不明"
-    rsi_str = f"RSI:{rsi_val:.0f}" if rsi_val else "RSI:?"
-    tech_summary = f"{trend} | MACD:{macd_str} | {rsi_str}"
-
-    # 详细技术细节（用于AI总结）
-    detail = f"趋势{trend}，"
-    if ma5:
-        detail += f"MA5={ma5:.2f} MA10={ma10:.2f} MA20={ma20:.2f}，"
-    detail += f"量能{vol_desc}({vol_change:+.1f}%)，"
-    if rsi_val:
-        detail += f"RSI={rsi_val:.1f}，"
-    detail += f"支撑{support} 压力{resistance}"
-
-    # 风险分类
-    risk_flag = "➖"
-    if "空头" in trend or (rsi_val and rsi_val < 30):
-        risk_flag = "🔴"
-    elif "多头" in trend and rsi_val and rsi_val > 70:
-        risk_flag = "🟡"  # 超买风险
-    elif "多头" in trend:
-        risk_flag = "🟢"
-
-    return risk_flag, tech_summary, detail, None
-
-def get_intelligence(code):
-    # 暂时保留，后续可接入新闻API
-    return []
+def get_news(stock_code):
+    """获取个股相关新闻标题"""
+    url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+    params = {
+        "page_size": 5,
+        "page_index": 1,
+        "stock_list": stock_code,
+        "f_node": 0,    # 0 表示全部公告和资讯
+        "s_node": 0
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        data = r.json()["data"]["list"]
+        return [f"{item['notice_date'][:10]} {item['title']}" for item in data]
+    except:
+        return []
 
 # ------------------------------------------------------------
-# AI 总结（生成顶部一句话风险判断）
+# AI 分析生成
 # ------------------------------------------------------------
-def generate_risk_summary(stocks_data):
+def call_deepseek(prompt):
     if not DEEPSEEK_API_KEY:
-        return "AI未配置"
-    data_text = ""
-    for sd in stocks_data:
-        data_text += f"{sd['name']}: 涨跌{sd.get('change_pct', 0):+.1f}%, 趋势{sd.get('trend', '→')}, 成交{format_amount(sd.get('amount', 0))}, 技术{sd.get('tech_detail', '无')}\n"
-    prompt = f"""根据以下持仓简况，用一句话（不超过40字）总结整体风险，并给出一个风险等级（低/中/高）。格式：🟢/🟡/🔴 风险等级 简要总结。
-{data_text}
-"""
-    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+        return "❌ 未配置DeepSeek API Key"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-chat",  # 你最优质的对话模型
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 80
+        "max_tokens": 1500
     }
     try:
-        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=15)
+        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
-    except:
-        return "风险总结生成失败"
+    except Exception as e:
+        return f"❌ AI调用失败：{str(e)}"
+
+def generate_full_brief(stocks_data):
+    """将整理好的数据传给DeepSeek，生成结构化简报"""
+    # 构建数据文本
+    data_text = ""
+    for sd in stocks_data:
+        data_text += f"\n股票：{sd['name']}（{sd['code']}）\n"
+        if sd.get("price"):
+            data_text += f"最新价：{sd['price']}元，涨跌幅：{sd['change_pct']:+.2f}%\n"
+        if sd.get("yest_kline"):
+            k = sd["yest_kline"]
+            data_text += f"上一交易日日K：开{k['open']:.2f} 收{k['close']:.2f} 高{k['high']:.2f} 低{k['low']:.2f} 成交量{k['volume']:.0f}手 换手率{k['turnover']:.2f}%\n"
+        # 资金流向
+        flows = sd.get("fund_flows", {})
+        if flows:
+            data_text += f"主力资金净流入：5日{format_amount(flows.get('5d',0))}，10日{format_amount(flows.get('10d',0))}，20日{format_amount(flows.get('20d',0))}\n"
+        # 新闻
+        if sd.get("news"):
+            data_text += f"最新相关新闻：\n"
+            for n in sd["news"]:
+                data_text += f"  · {n}\n"
+        else:
+            data_text += "无相关新闻\n"
+
+    prompt = f"""你是一位顶级投资分析师，请根据以下每只股票的真实数据，生成一份简练、结构化的投资简报。简报必须包含以下两个部分：
+
+【一、风险提示】
+- 对存在明显技术风险（如破位、资金持续流出）、重大利空消息的个股进行重点提示，用🔴标记。
+- 若无明确风险，则说“今日无特别风险提示”。
+
+【二、个股针对性分析】
+- 对每只股票，结合日K线形态、主力资金多日流向、相关新闻，给出简洁的操作建议（如持有、减仓、观望等），并说明核心理由。
+- 每只股票分析不超过4行。
+
+数据如下：
+{data_text}
+
+请直接输出，不要额外解释。"""
+
+    return call_deepseek(prompt)
 
 # ------------------------------------------------------------
 # 主流程
@@ -261,82 +233,67 @@ def main():
 
     for code, name, cost in stocks:
         print(f"处理：{name}({code})")
-        quote = get_realtime_quote(code)
-        kline_df = get_kline_data(code)
-        risk_flag, tech_summary, tech_detail, tech_error = compute_technical(kline_df)
+        # 获取最近1根日K线（前一交易日）
+        kline_df = get_kline_data(code, count=1)
+        yest_kline = None
+        price = None
+        change_pct = None
+        if kline_df is not None and not kline_df.empty:
+            last = kline_df.iloc[-1]
+            yest_kline = {
+                "open": last["open"],
+                "close": last["close"],
+                "high": last["high"],
+                "low": last["low"],
+                "volume": last["volume"],
+                "turnover": last["turnover"] if pd.notna(last["turnover"]) else 0.0
+            }
+            price = last["close"]
+            change_pct = last["pct_chg"] if pd.notna(last["pct_chg"]) else 0.0
 
-        price = quote["price"] if quote else None
-        change_pct = quote["change_pct"] if quote else None
-        amount = quote["amount"] if quote else None
+        # 获取20日主力资金流向
+        fund_flows_raw = get_fund_flow_multi(code, days=20)
+        fund_summary = {}
+        if fund_flows_raw and len(fund_flows_raw) >= 20:
+            fund_summary["5d"] = sum(fund_flows_raw[-5:])
+            fund_summary["10d"] = sum(fund_flows_raw[-10:])
+            fund_summary["20d"] = sum(fund_flows_raw)
+        elif fund_flows_raw:
+            # 数据不足20日，有多少算多少
+            fund_summary["5d"] = sum(fund_flows_raw[-5:]) if len(fund_flows_raw) >= 5 else sum(fund_flows_raw)
+            fund_summary["10d"] = sum(fund_flows_raw[-10:]) if len(fund_flows_raw) >= 10 else sum(fund_flows_raw)
+            fund_summary["20d"] = sum(fund_flows_raw)
 
-        # 盈亏计算
+        # 获取新闻
+        news = get_news(code)
+
+        # 盈亏
         profit_str = ""
         if price and cost:
             profit_pct = (price - cost) / cost * 100
             profit_str = f" | 成本{cost:.2f} 盈亏{profit_pct:+.1f}%"
-
-        # 从tech_summary提取趋势文字
-        trend_text = tech_summary.split("|")[0].strip() if tech_summary else "→横盘"
 
         stocks_data.append({
             "name": name,
             "code": code,
             "price": price,
             "change_pct": change_pct,
-            "amount": amount,
-            "risk_flag": risk_flag,
-            "tech_summary": tech_summary,
-            "trend": trend_text,
-            "tech_detail": tech_detail,
-            "profit_str": profit_str,
-            "intel": get_intelligence(code)
+            "yest_kline": yest_kline,
+            "fund_flows": fund_summary,
+            "news": news,
+            "profit_str": profit_str
         })
 
-    # 获取整体风险总结
-    risk_summary = generate_risk_summary(stocks_data)
+    # 调用AI生成简报
+    print("正在请求DeepSeek生成分析...")
+    ai_brief = generate_full_brief(stocks_data)
 
-    # 按风险分组排序：🔴 > 🟡 > 🟢 > ➖
-    risk_order = {"🔴": 0, "🟡": 1, "🟢": 2, "➖": 3}
-    stocks_data.sort(key=lambda x: risk_order.get(x["risk_flag"], 9))
-
-    # 分组
-    high_risk = [s for s in stocks_data if s["risk_flag"] == "🔴"]
-    strong = [s for s in stocks_data if s["risk_flag"] == "🟢"]
-    watch = [s for s in stocks_data if s["risk_flag"] in ("🟡", "➖")]
-
-    # 构建邮件
+    # 组装邮件
     body = f"📈 投资简报 | {now}\n"
     body += "━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += f"{risk_summary}\n\n"
-
-    # 高风险
-    if high_risk:
-        body += "━━━━━━━━━━━━━━━━━━━━━━\n🔴 高风险关注\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for s in high_risk:
-            body += f"\n【{s['name']}】{s['price']}元 | {s['change_pct']:+.2f}%{s['profit_str']}\n"
-            body += f"  趋势：{s['tech_summary']}\n"
-            body += f"  资金：成交 {format_amount(s['amount'])}\n"
-            for intel in s["intel"]:
-                body += f"  ⚠️ {intel}\n"
-
-    # 强势
-    if strong:
-        body += "\n━━━━━━━━━━━━━━━━━━━━━━\n🟢 强势持仓\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for s in strong:
-            body += f"\n【{s['name']}】{s['price']}元 | {s['change_pct']:+.2f}%{s['profit_str']}\n"
-            body += f"  趋势：{s['tech_summary']}\n"
-            body += f"  资金：成交 {format_amount(s['amount'])}\n"
-
-    # 观望
-    if watch:
-        body += "\n━━━━━━━━━━━━━━━━━━━━━━\n➖ 观望标的\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        for s in watch:
-            body += f"\n【{s['name']}】{s['price']}元 | {s['change_pct']:+.2f}%{s['profit_str']}\n"
-            body += f"  趋势：{s['tech_summary']}\n"
-            body += f"  资金：成交 {format_amount(s['amount'])}\n"
-
-    body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += "数据源：新浪财经 | 分析：DeepSeek AI | 仅供参考，不构成投资建议。"
+    body += ai_brief if ai_brief else "AI分析生成失败，请检查日志"
+    body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    body += "数据源：东方财富 | 分析：DeepSeek AI | 仅供参考，不构成投资建议。"
 
     send_email(f"📈 投资简报 {now}", body)
     print("简报发送完毕")
