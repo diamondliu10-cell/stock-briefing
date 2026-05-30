@@ -1,6 +1,7 @@
 import requests
 import smtplib
 import os
+import json
 import re
 import time
 from email.mime.text import MIMEText
@@ -61,19 +62,23 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# 消息获取
+# 消息获取与过滤
 # ------------------------------------------------------------
-def fetch_cninfo(code, days=3):
-    """从巨潮资讯网获取公告"""
+def is_relevant(title, code, name):
+    """判断消息标题是否与给定股票相关"""
+    # 精确匹配股票名称或代码
+    if name in title or code in title:
+        return True
+    # 常见简称匹配（取股票名称的前2-3个字）
+    short_names = [name[:2], name[:3], name[:4]]
+    for sn in short_names:
+        if len(sn) >= 2 and sn in title:
+            return True
+    return False
+
+def fetch_cninfo(code, name, days=3):
     messages = []
     try:
-        # 巨潮资讯网个股公告页面
-        url = f"http://www.cninfo.com.cn/new/disclosure/detail?stockCode={code}&orgId=gssz{code}"
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "http://www.cninfo.com.cn/"
-        }
-        # 实际上巨潮有专门的公告列表API
         api_url = "http://www.cninfo.com.cn/new/hisAnnouncement/query"
         end_date = beijing_date()
         start_date = (datetime.now(BEIJING_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -86,6 +91,7 @@ def fetch_cninfo(code, days=3):
             "column": "szse",
             "tabName": "fulltext"
         }
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": "http://www.cninfo.com.cn/"}
         resp = requests.post(api_url, data=params, headers=headers, timeout=15)
         data = resp.json()
         if data.get("announcements"):
@@ -94,20 +100,18 @@ def fetch_cninfo(code, days=3):
                 date_str = item.get("adjunctUrl", "")[:10] if item.get("adjunctUrl") else ""
                 if not date_str:
                     date_str = item.get("announcementTime", "")[:10]
-                url_path = item.get("adjunctUrl", "")
-                full_url = f"http://static.cninfo.com.cn/{url_path}" if url_path else ""
-                messages.append({
-                    "date": date_str,
-                    "title": title,
-                    "source": "巨潮资讯",
-                    "url": full_url
-                })
+                # 只保留与该公司相关的消息
+                if is_relevant(title, code, name):
+                    messages.append({
+                        "date": date_str,
+                        "title": title,
+                        "source": "巨潮资讯"
+                    })
     except Exception as e:
         print(f"巨潮资讯获取异常 {code}: {e}")
     return messages
 
 def fetch_eastmoney(code, name, days=3):
-    """从东方财富获取个股资讯和研报"""
     messages = []
     try:
         url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
@@ -124,29 +128,25 @@ def fetch_eastmoney(code, name, days=3):
         cutoff = (datetime.now(BEIJING_TZ) - timedelta(days=days)).strftime("%Y-%m-%d")
         for item in items:
             date_str = item["notice_date"][:10]
-            if date_str >= cutoff:
+            title = item["title"]
+            if date_str >= cutoff and is_relevant(title, code, name):
                 messages.append({
                     "date": date_str,
-                    "title": item["title"],
-                    "source": "东方财富",
-                    "url": f"https://data.eastmoney.com/notices/detail/{code}/{item['art_code']}.html"
+                    "title": title,
+                    "source": "东方财富"
                 })
     except Exception as e:
         print(f"东方财富获取异常 {code}: {e}")
     return messages
 
 def fetch_regulatory(code, name):
-    """从交易所获取监管信息"""
     messages = []
     try:
-        # 判断交易所
         if code.startswith(("0", "3")):
-            exchange = "szse"  # 深交所
+            exchange = "szse"
         else:
-            exchange = "sse"   # 上交所
-        
+            exchange = "sse"
         if exchange == "szse":
-            # 深交所问询函查询
             url = "https://www.szse.cn/api/disc/announcement/queryAnnList"
             params = {
                 "stockCode": code,
@@ -161,15 +161,13 @@ def fetch_regulatory(code, name):
             if data.get("data"):
                 for item in data["data"]:
                     title = item.get("title", "")
-                    if any(kw in title for kw in ["问询", "关注", "监管", "处分", "警示"]):
+                    if any(kw in title for kw in ["问询", "关注", "监管", "处分", "警示"]) and is_relevant(title, code, name):
                         messages.append({
                             "date": item.get("pubDate", "")[:10],
                             "title": title,
-                            "source": "深交所",
-                            "url": f"https://www.szse.cn{data.get('attachPath', '')}"
+                            "source": "深交所"
                         })
         else:
-            # 上交所监管函查询
             url = "https://query.sse.com.cn/listedquery/announcement/queryAnnList.do"
             headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.sse.com.cn/"}
             params = {
@@ -187,33 +185,28 @@ def fetch_regulatory(code, name):
                     if len(cells) >= 3:
                         title = cells[1].text.strip()
                         date_str = cells[2].text.strip()
-                        if any(kw in title for kw in ["问询", "关注", "监管", "处分", "警示"]):
+                        if any(kw in title for kw in ["问询", "关注", "监管", "处分", "警示"]) and is_relevant(title, code, name):
                             messages.append({
                                 "date": date_str,
                                 "title": title,
-                                "source": "上交所",
-                                "url": f"https://www.sse.com.cn{cells[1].select_one('a').get('href', '')}"
+                                "source": "上交所"
                             })
     except Exception as e:
         print(f"交易所监管信息获取异常 {code}: {e}")
     return messages
 
 def gather_all_messages(code, name):
-    """汇总所有来源的消息"""
     all_msgs = []
-    all_msgs.extend(fetch_cninfo(code))
+    all_msgs.extend(fetch_cninfo(code, name))
     all_msgs.extend(fetch_eastmoney(code, name))
     all_msgs.extend(fetch_regulatory(code, name))
-    
-    # 去重（按标题）
+    # 去重
     seen = set()
     unique = []
     for msg in all_msgs:
         if msg["title"] not in seen:
             seen.add(msg["title"])
             unique.append(msg)
-    
-    # 按日期倒序
     unique.sort(key=lambda x: x["date"], reverse=True)
     return unique
 
@@ -240,8 +233,7 @@ def call_deepseek(prompt):
     except Exception as e:
         return f"❌ AI调用失败：{str(e)}"
 
-def generate_analysis(stocks_data, report_date):
-    # 构建消息文本
+def analyze_messages(stocks_data, report_date, is_afternoon=False):
     data_text = ""
     for sd in stocks_data:
         data_text += f"\n【{sd['name']}（{sd['code']}）】\n"
@@ -250,20 +242,15 @@ def generate_analysis(stocks_data, report_date):
             for m in msgs:
                 data_text += f"  [{m['date']}] [{m['source']}] {m['title']}\n"
         else:
-            data_text += "  近3日无公告/新闻\n"
+            data_text += "  无新消息\n"
         data_text += "\n"
 
-    prompt = f"""你是资深投资分析师。今天日期：{report_date}。请基于以下近3日的公司公告和新闻，撰写一份每日消息面简报。
+    prompt = f"""你是资深投资分析师。今天日期：{report_date}。请基于以下{"新增" if is_afternoon else "近3日"}消息，撰写一份消息面简报。
 
-⚠️ 规则：
-1. 日期必须为 {report_date}。
-2. 每只股票的消息按以下格式分析：
-   股票名（代码）：
-   · 关键消息1：[来源] 标题 → 利好/利空/中性，理由（1句）
-   · 关键消息2：[来源] 标题 → 利好/利空/中性，理由（1句）
-   （最多3条，选最重要的，无关的消息略过）
-   · 综合判断：🔴/🟢/➖ 持有/关注/谨慎（1句话）
-3. 最后，如果任何股票存在减持、监管问询、业绩大幅下滑、重大诉讼等利空，请单独列出【⚠️ 风险预警】，用🔴标记。
+要求：
+1. 每只股票列出最重要的消息（最多3条），每条标注来源和利好/利空/中性判断，并简要说明理由。
+2. 如果某只股票无消息，写“暂无新消息”。
+3. 最后，若存在减持、监管问询、业绩大幅下滑、重大诉讼等利空，请单独列出【⚠️ 风险预警】，用🔴标记。
 
 {data_text}"""
     return call_deepseek(prompt)
@@ -272,50 +259,105 @@ def generate_analysis(stocks_data, report_date):
 # 主流程
 # ------------------------------------------------------------
 def main():
-    print(f"简报开始 - {beijing_now()}")
-    stocks = load_stocks()
-    if not stocks:
-        send_email("股票简报 - 错误", "股票列表为空")
-        return
-
     now = beijing_now()
     report_date = beijing_date()
-    stocks_data = []
+    stocks = load_stocks()
+    if not stocks:
+        send_email("消息简报 - 错误", "股票列表为空")
+        return
 
+    morning_file = os.environ.get("MORNING_DATA_PATH", "")
+    morning_msgs = {}
+    if morning_file and os.path.exists(morning_file):
+        try:
+            with open(morning_file, "r", encoding="utf-8") as f:
+                morning_msgs = json.load(f)
+        except:
+            morning_msgs = {}
+
+    is_afternoon = bool(morning_msgs)
+
+    stocks_data = []
     for code, name in stocks:
         print(f"处理：{name}({code})")
         messages = gather_all_messages(code, name)
-        print(f"  共获取 {len(messages)} 条消息")
+        # 只保留与该股票直接相关的消息
+        relevant_msgs = [m for m in messages if is_relevant(m["title"], code, name)]
+        print(f"  共获取 {len(messages)} 条消息，其中 {len(relevant_msgs)} 条相关")
         stocks_data.append({
             "name": name,
             "code": code,
-            "messages": messages
+            "messages": relevant_msgs
         })
 
-    # 生成AI分析
-    print("请求DeepSeek分析...")
-    ai_analysis = generate_analysis(stocks_data, report_date)
+    if not is_afternoon:
+        # 上午模式
+        print("上午模式：生成全量简报")
+        ai_analysis = analyze_messages(stocks_data, report_date, is_afternoon=False)
 
-    # 构建邮件
-    body = f"📈 每日消息简报 | {now}\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    body += ai_analysis if ai_analysis else "AI分析生成失败"
-    body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += "【📋 消息详情】\n\n"
-    for sd in stocks_data:
-        body += f"🔹 {sd['name']}（{sd['code']}）\n"
-        msgs = sd.get("messages", [])
-        if msgs:
-            for m in msgs:
-                body += f"  [{m['date']}] [{m['source']}] {m['title']}\n"
+        body = f"📈 每日消息简报 | {now}\n"
+        body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        body += ai_analysis
+        body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n【📋 消息详情】\n\n"
+        for sd in stocks_data:
+            body += f"🔹 {sd['name']}（{sd['code']}）\n"
+            if sd['messages']:
+                for m in sd['messages']:
+                    body += f"  [{m['date']}] [{m['source']}] {m['title']}\n"
+            else:
+                body += "  近3日无相关公告/新闻\n"
+            body += "\n"
+        body += "━━━━━━━━━━━━━━━━━━━━━━\n"
+        body += "数据源：巨潮资讯、深交所、上交所、东方财富 | 分析：DeepSeek AI | 仅供参考，不构成投资建议"
+
+        send_email(f"📈 消息简报 {now}", body)
+
+        # 保存上午消息
+        morning_data = {}
+        for sd in stocks_data:
+            morning_data[sd["code"]] = [{"date": m["date"], "title": m["title"], "source": m["source"]} for m in sd["messages"]]
+        with open("morning_news.json", "w", encoding="utf-8") as f:
+            json.dump(morning_data, f, ensure_ascii=False)
+        print("上午消息已保存")
+    else:
+        # 下午模式：只对比新增
+        print("下午模式：检测新增消息")
+        new_stocks_data = []
+        has_new = False
+        for sd in stocks_data:
+            code = sd["code"]
+            old_list = morning_msgs.get(code, [])
+            old_titles = {m["title"] for m in old_list}
+            new_msgs = [m for m in sd["messages"] if m["title"] not in old_titles]
+            if new_msgs:
+                has_new = True
+                new_stocks_data.append({
+                    "name": sd["name"],
+                    "code": code,
+                    "messages": new_msgs
+                })
+
+        if not has_new:
+            print("无新增消息，不发送邮件")
         else:
-            body += "  近3日无公告/新闻\n"
-        body += "\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━\n"
-    body += "数据源：巨潮资讯、深交所、上交所、东方财富 | 分析：DeepSeek AI | 仅供参考，不构成投资建议"
+            print(f"发现 {sum(len(s['messages']) for s in new_stocks_data)} 条新增消息，发送简报")
+            ai_analysis = analyze_messages(new_stocks_data, report_date, is_afternoon=True)
 
-    send_email(f"📈 消息简报 {now}", body)
-    print("简报发送完毕")
+            body = f"📈 午间消息更新 | {now}\n"
+            body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            body += ai_analysis
+            body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n【📋 新增消息详情】\n\n"
+            for sd in new_stocks_data:
+                body += f"🔹 {sd['name']}（{sd['code']}）\n"
+                for m in sd['messages']:
+                    body += f"  [{m['date']}] [{m['source']}] {m['title']}\n"
+                body += "\n"
+            body += "━━━━━━━━━━━━━━━━━━━━━━\n"
+            body += "数据源：巨潮资讯、深交所、上交所、东方财富 | 分析：DeepSeek AI | 仅供参考"
+
+            send_email(f"📈 午间消息更新 {now}", body)
+
+    print("任务结束")
 
 if __name__ == "__main__":
     main()
