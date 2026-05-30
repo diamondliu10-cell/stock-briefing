@@ -2,7 +2,8 @@ name: 每日投资简报
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 北京时间早上8:00
+    # 北京时间早上8:00 (UTC 0:00)
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
@@ -21,7 +22,6 @@ jobs:
         pip install requests
         pip install pandas
         pip install numpy
-        pip install mplfinance
 
     - name: Run briefing script
       env:
