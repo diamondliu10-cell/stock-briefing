@@ -2,6 +2,7 @@ import requests
 import smtplib
 import os
 import json
+import urllib.parse
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -74,7 +75,7 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# DeepSeek 联网搜索（花括号转义修复）
+# DeepSeek 联网搜索（不要求链接，只要求标题+来源+判断）
 # ------------------------------------------------------------
 def search_stock_news(code, name, report_date):
     if not DEEPSEEK_API_KEY:
@@ -86,10 +87,9 @@ def search_stock_news(code, name, report_date):
 
 必须按照以下格式逐条输出（每条单独一行，最多6条）：
 [{{日期}}] [{{来源}}] {{标题}} → 【利好/利空/中性】 {{原因(不超过15字)}}
-  🔗 {{原文链接}}
 
 要求：
-1. 每条消息必须包含原文链接，链接要完整且可点击
+1. 不要输出链接，只需上述格式的内容。
 2. 如果未搜到该时间段内的消息，回复：近一周未搜到相关消息
 3. 如果搜索功能无法使用，回复：搜索不可用
 4. 只输出上述格式的内容，不要添加任何解释性开头语或结尾语"""
@@ -115,6 +115,43 @@ def search_stock_news(code, name, report_date):
         return f"搜索失败：{str(e)}"
 
 # ------------------------------------------------------------
+# 为每条消息生成百度搜索链接
+# ------------------------------------------------------------
+def add_search_link(msg_block):
+    """给每条消息添加百度搜索链接"""
+    lines = msg_block.split('\n')
+    new_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('🔍'):
+            continue
+        # 提取标题（在 → 之前的部分，去除日期和来源）
+        if '→' in line:
+            # 格式: [日期] [来源] 标题 → 判断
+            title_part = line.split('→')[0].strip()
+            # 去掉前两个方括号里的内容
+            if '] [' in title_part:
+                title_start = title_part.find('] [') + 2
+                title_end = title_part.find('] ', title_start)
+                if title_end != -1:
+                    title = title_part[title_end+2:].strip()
+                else:
+                    title = title_part[title_start+1:].strip()
+            else:
+                # 异常情况，直接取 → 前面的
+                title = title_part
+            if title:
+                encoded = urllib.parse.quote(title)
+                search_link = f"🔍 百度搜索：https://www.baidu.com/s?wd={encoded}"
+                new_lines.append(line)
+                new_lines.append(search_link)
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    return '\n'.join(new_lines)
+
+# ------------------------------------------------------------
 # 生成一页图片
 # ------------------------------------------------------------
 def generate_image(stocks_data, report_date):
@@ -128,11 +165,10 @@ def generate_image(stocks_data, report_date):
 
     total_lines = 0
     for sd in stocks_data:
-        total_lines += 1
-        msg_text = sd["result"]
-        lines = msg_text.split('\n')
+        total_lines += 1  # 股票名
+        lines = sd["result"].split('\n')
         total_lines += len(lines)
-        total_lines += 1
+        total_lines += 1  # 空行
 
     fig_height = max(14, total_lines * 0.45 + 5)
     fig, ax = plt.subplots(figsize=(14, fig_height), facecolor='#F4F6F9')
@@ -145,6 +181,7 @@ def generate_image(stocks_data, report_date):
             transform=ax.transAxes, ha='center', fontproperties=font_title, color='#1a1a2e')
     y_pos -= 1.2
 
+    # 风险预警
     risk_msgs = []
     for sd in stocks_data:
         for line in sd["result"].split('\n'):
@@ -179,7 +216,7 @@ def generate_image(stocks_data, report_date):
             line = line.strip()
             if not line:
                 continue
-            if '🔗' in line:
+            if line.startswith('🔍'):
                 if len(line) > 120:
                     line = line[:117] + '...'
                 ax.text(0.14, y_pos/fig_height, line, transform=ax.transAxes,
@@ -228,9 +265,12 @@ def main():
     stocks_data = []
     for code, name in stocks:
         print(f"搜索：{name}({code})")
-        result = search_stock_news(code, name, report_date)
-        stocks_data.append({"name": name, "code": code, "result": result})
+        raw = search_stock_news(code, name, report_date)
+        # 为消息添加百度搜索链接
+        enriched = add_search_link(raw)
+        stocks_data.append({"name": name, "code": code, "result": enriched})
 
+    # 生成文字版
     text_body = f"📈 每日消息简报 | {now}\n"
     text_body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     risk_list = []
@@ -245,25 +285,26 @@ def main():
     text_body += "【📊 个股消息及判断】\n"
     for sd in stocks_data:
         text_body += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
-    text_body += "\n━━━━━━━━━━━━━━━━━━━━━━\n数据源：DeepSeek 联网搜索 | 仅供参考"
+    text_body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    text_body += "🔍 点击搜索链接即可查看原文 | 数据源：DeepSeek 联网搜索 | 仅供参考"
 
     img_data = generate_image(stocks_data, report_date)
 
     if not is_afternoon:
         send_email(f"📈 消息简报 {now}", text_body, img_data)
-        fingerprint = {}
+        fp = {}
         for sd in stocks_data:
-            fingerprint[sd["code"]] = sd["result"][:300]
+            fp[sd["code"]] = sd["result"][:300]
         with open("morning_news.json", "w", encoding="utf-8") as f:
-            json.dump(fingerprint, f, ensure_ascii=False)
+            json.dump(fp, f, ensure_ascii=False)
         print("上午简报已发送")
     else:
         new_data = []
         has_new = False
         for sd in stocks_data:
             old = morning_msgs.get(sd["code"], "")
-            new_finger = sd["result"][:300]
-            if new_finger != old and "未搜到" not in sd["result"] and "搜索不可用" not in sd["result"]:
+            new_fp = sd["result"][:300]
+            if new_fp != old and "未搜到" not in sd["result"] and "搜索不可用" not in sd["result"]:
                 new_data.append(sd)
                 has_new = True
         if has_new:
@@ -279,7 +320,8 @@ def main():
             new_text += "【📊 新增个股消息】\n"
             for sd in new_data:
                 new_text += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
-            new_text += "\n━━━━━━━━━━━━━━━━━━━━━━\n数据源：DeepSeek 联网搜索 | 仅供参考"
+            new_text += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            new_text += "🔍 点击搜索链接即可查看原文 | 数据源：DeepSeek 联网搜索 | 仅供参考"
             new_img = generate_image(new_data, report_date)
             send_email(f"📈 午间消息更新 {now}", new_text, new_img)
             print("下午新增简报已发送")
