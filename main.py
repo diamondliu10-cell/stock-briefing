@@ -59,37 +59,38 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# DeepSeek 联网搜索（无需第三方 API）
+# DeepSeek 联网搜索（优化版提示词）
 # ------------------------------------------------------------
-def search_with_deepseek(code, name):
+def search_with_deepseek(code, name, report_date):
     """
-    调用 DeepSeek API，开启联网搜索，让 AI 直接搜索并总结该股票的最新消息。
-    返回 AI 总结后的文本。
+    调用 DeepSeek API，开启联网搜索。
+    强制指定搜索周期为近一周，并要求输出格式精简。
     """
     if not DEEPSEEK_API_KEY:
-        return "❌ 未配置 DeepSeek API Key"
+        return f"❌ 未配置 DeepSeek API Key"
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    prompt = f"""请联网搜索 {name}（股票代码 {code}）近一周的重要公告、新闻、监管信息。
+    prompt = f"""今天是 {report_date}。请联网搜索 {name}（股票代码 {code}）最近一周（从 {report_date} 往前推7天）内的重要公告、新闻、监管信息。
 
-要求：
-1. 列出 3-5 条最重要的消息，每条包含标题、来源、日期、内容摘要（50字以内）
-2. 判断每条消息是利好、利空还是中性
-3. 如果有减持、监管处罚、业绩大幅下滑、诉讼等重大利空，请特别标注🔴
-4. 如果没有搜到相关消息，回复"近一周未搜到相关消息"
-5. 只回复搜索结果，不要添加额外说明"""
+按以下格式逐条列出（每条一行，最多5条，选择最重要的）：
+[日期] [来源] 消息标题 → 【利好/利空/中性】原因简述（15字以内）
+
+如果未搜到近一周的消息，回复：近一周未搜到相关消息
+如果搜索失败，回复：搜索暂时不可用
+
+只输出上述格式的内容，不要添加开头语或结尾语。"""
 
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.3,
-        "max_tokens": 2000,
+        "max_tokens": 1500,
         "stream": False,
-        "search": True   # 开启联网搜索
+        "search": True
     }
 
     try:
@@ -101,27 +102,49 @@ def search_with_deepseek(code, name):
         return f"搜索失败：{str(e)}"
 
 # ------------------------------------------------------------
-# AI 综合分析
+# AI 综合分析（风险前置 + 精简输出）
 # ------------------------------------------------------------
 def generate_final_summary(all_results, report_date):
-    """将每只股票的搜索结果汇总，生成最终简报"""
+    """将每只股票的搜索结果汇总，生成风险前置的简报"""
     if not DEEPSEEK_API_KEY:
         return "❌ 未配置 DeepSeek API Key"
 
+    # 先提取所有股票中的利空消息，用于风险汇总
+    risk_lines = []
     data_text = ""
     for item in all_results:
-        data_text += f"\n【{item['name']}（{item['code']}）】\n"
-        data_text += item["result"] + "\n"
+        result = item["result"]
+        data_text += f"\n【{item['name']}（{item['code']}）】\n{result}\n"
+        # 提取利空行
+        for line in result.split("\n"):
+            if "利空" in line or "🔴" in line:
+                risk_lines.append(f"  {item['name']}：{line.strip()}")
 
-    prompt = f"""你是资深投资分析师。今天日期：{report_date}。请基于以下搜索到的近一周消息，撰写消息面简报。
+    # 构建风险提示部分
+    risk_section = ""
+    if risk_lines:
+        risk_section = "【⚠️ 风险预警】\n"
+        for rl in risk_lines[:10]:  # 最多10条风险
+            risk_section += f"🔴 {rl}\n"
+        risk_section += "\n"
+    else:
+        risk_section = "【⚠️ 风险预警】\n今日未发现明确利空信号\n\n"
 
-要求：
-1. 每只股票列出最重要的消息（最多3条），每条标注利好/利空/中性判断，并简要说明理由。
-2. 如果某只股票无消息，写"近一周未搜到相关消息"。
-3. 最后，若存在减持、监管问询、业绩大幅下滑、重大诉讼等利空，请单独列出【⚠️ 风险预警】，用🔴标记。
+    prompt = f"""你是资深投资分析师。今天日期：{report_date}。
 
-{data_text}"""
-    
+请基于以下搜索到的近一周消息，生成一份精简的消息面简报。严格按以下结构输出：
+
+【⚠️ 风险预警】
+- 如果以下消息中存在减持、监管问询、业绩大幅下滑、重大诉讼等利空，请在此处汇总，每条用🔴标记
+- 如果没有利空，写"今日未发现明确利空信号"
+
+【📊 个股消息及判断】
+对每只股票，直接复述其搜索结果（已包含利好/利空/中性判断和原因），不要重新分析。如果某只股票显示"近一周未搜到相关消息"或"搜索暂时不可用"，保留原文即可，不要删掉。
+
+{data_text}
+
+只输出上述两个模块的内容，不要添加开头语、结尾语或额外分析。"""
+
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
@@ -167,7 +190,7 @@ def main():
     all_results = []
     for code, name in stocks:
         print(f"联网搜索：{name}({code})...")
-        search_result = search_with_deepseek(code, name)
+        search_result = search_with_deepseek(code, name, report_date)
         print(f"  搜索完成")
         all_results.append({
             "name": name,
@@ -180,35 +203,31 @@ def main():
     final_brief = generate_final_summary(all_results, report_date)
 
     if not is_afternoon:
-        # 上午模式
+        # 上午模式：完整简报
         body = f"📈 每日消息简报 | {now}\n"
         body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         body += final_brief
-        body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n【📋 搜索详情】\n\n"
-        for item in all_results:
-            body += f"🔹 {item['name']}（{item['code']}）\n"
-            body += f"{item['result']}\n\n"
-        body += "━━━━━━━━━━━━━━━━━━━━━━\n"
-        body += "数据源：DeepSeek 联网搜索 | 分析：DeepSeek AI | 仅供参考，不构成投资建议"
+        body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        body += "数据源：DeepSeek 联网搜索 | 仅供参考，不构成投资建议"
 
         send_email(f"📈 消息简报 {now}", body)
 
         # 保存上午摘要用于下午对比
         morning_data = {}
         for item in all_results:
-            morning_data[item["code"]] = item["result"][:200]  # 用前200字做指纹
+            morning_data[item["code"]] = item["result"][:200]
         with open("morning_news.json", "w", encoding="utf-8") as f:
             json.dump(morning_data, f, ensure_ascii=False)
         print("上午数据已保存")
     else:
-        # 下午模式：对比是否有新增
+        # 下午模式：只检测新增
         has_new = False
         new_items = []
         for item in all_results:
             code = item["code"]
             old_fingerprint = morning_msgs.get(code, "")
             new_fingerprint = item["result"][:200]
-            if new_fingerprint != old_fingerprint and "未搜到相关消息" not in item["result"]:
+            if new_fingerprint != old_fingerprint and "未搜到相关消息" not in item["result"] and "搜索失败" not in item["result"]:
                 has_new = True
                 new_items.append(item)
 
@@ -221,12 +240,8 @@ def main():
             body = f"📈 午间消息更新 | {now}\n"
             body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
             body += final_brief_pm
-            body += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n【📋 新增消息详情】\n\n"
-            for item in new_items:
-                body += f"🔹 {item['name']}（{item['code']}）\n"
-                body += f"{item['result']}\n\n"
-            body += "━━━━━━━━━━━━━━━━━━━━━━\n"
-            body += "数据源：DeepSeek 联网搜索 | 分析：DeepSeek AI | 仅供参考"
+            body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            body += "数据源：DeepSeek 联网搜索 | 仅供参考"
 
             send_email(f"📈 午间消息更新 {now}", body)
 
