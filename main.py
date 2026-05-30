@@ -2,9 +2,15 @@ import requests
 import smtplib
 import os
 import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
 
 # ------------------------------------------------------------
 # 基础配置
@@ -19,18 +25,29 @@ def beijing_now():
 def beijing_date():
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
-def send_email(subject, body):
+def send_email(subject, body_text, img_bytes):
     user = os.environ.get("EMAIL_USER")
     password = os.environ.get("EMAIL_PASS")
     to_addr = os.environ.get("EMAIL_TO")
     if not user or not password or not to_addr:
         print("邮件凭证缺失")
         return
-    msg = MIMEMultipart()
+    msg = MIMEMultipart("related")
     msg["From"] = user
     msg["To"] = to_addr
     msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    # 添加纯文本备用
+    alt = MIMEMultipart("alternative")
+    msg.attach(alt)
+    alt.attach(MIMEText(body_text, "plain", "utf-8"))
+
+    # 添加图片
+    img = MIMEImage(img_bytes, _subtype="png")
+    img.add_header("Content-ID", "<briefing_chart>")
+    img.add_header("Content-Disposition", "inline", filename="briefing.png")
+    msg.attach(img)
+
     try:
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
@@ -59,123 +76,148 @@ def load_stocks():
     return stocks
 
 # ------------------------------------------------------------
-# DeepSeek 联网搜索（优化版提示词）
+# DeepSeek 联网搜索（精确控制日期和格式）
 # ------------------------------------------------------------
-def search_with_deepseek(code, name, report_date):
-    """
-    调用 DeepSeek API，开启联网搜索。
-    强制指定搜索周期为近一周，并要求输出格式精简。
-    """
+def search_stock_news(code, name, report_date):
     if not DEEPSEEK_API_KEY:
-        return f"❌ 未配置 DeepSeek API Key"
+        return ["❌ API Key未配置"]
+
+    # 计算一周前日期
+    start_date = (datetime.now(BEIJING_TZ) - timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    prompt = f"""今天是 {report_date}。请严格搜索 {name}（股票代码 {code}）在 {start_date} 至 {report_date} 期间（注意必须是这个时间段内的最新消息，不要使用更早的日期）的所有重要公告、新闻、监管信息。
+
+必须按照以下格式逐条输出（每条单独一行，最多6条）：
+[日期] [来源] 标题 → 【利好/利空/中性】 原因(不超过15字)
+如果未搜到任何该时间段内的消息，请回复：近一周未搜到相关消息
+如果搜索功能无法使用，请回复：搜索不可用
+
+只输出上述格式的内容，不要添加任何解释。"""
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    prompt = f"""今天是 {report_date}。请联网搜索 {name}（股票代码 {code}）最近一周（从 {report_date} 往前推7天）内的重要公告、新闻、监管信息。
-
-按以下格式逐条列出（每条一行，最多5条，选择最重要的）：
-[日期] [来源] 消息标题 → 【利好/利空/中性】原因简述（15字以内）
-
-如果未搜到近一周的消息，回复：近一周未搜到相关消息
-如果搜索失败，回复：搜索暂时不可用
-
-只输出上述格式的内容，不要添加开头语或结尾语。"""
-
     payload = {
         "model": "deepseek-chat",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
+        "temperature": 0.1,
         "max_tokens": 1500,
-        "stream": False,
         "search": True
     }
 
     try:
         resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=60)
         resp.raise_for_status()
-        result = resp.json()
-        return result["choices"][0]["message"]["content"].strip()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        return result
     except Exception as e:
         return f"搜索失败：{str(e)}"
 
 # ------------------------------------------------------------
-# AI 综合分析（风险前置 + 精简输出）
+# 生成一页图片（模块化，无遗漏）
 # ------------------------------------------------------------
-def generate_final_summary(all_results, report_date):
-    """将每只股票的搜索结果汇总，生成风险前置的简报"""
-    if not DEEPSEEK_API_KEY:
-        return "❌ 未配置 DeepSeek API Key"
+def generate_image(stocks_data, report_date):
+    # 确保中文字体
+    font_path = '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc'
+    if not os.path.exists(font_path):
+        font_path = fm.findfont(fm.FontProperties(family='WenQuanYi Zen Hei'))
+    font_title = fm.FontProperties(fname=font_path, size=16, weight='bold')
+    font_head = fm.FontProperties(fname=font_path, size=12, weight='bold')
+    font_body = fm.FontProperties(fname=font_path, size=9)
+    font_small = fm.FontProperties(fname=font_path, size=7)
 
-    # 先提取所有股票中的利空消息，用于风险汇总
-    risk_lines = []
-    data_text = ""
-    for item in all_results:
-        result = item["result"]
-        data_text += f"\n【{item['name']}（{item['code']}）】\n{result}\n"
-        # 提取利空行
-        for line in result.split("\n"):
-            if "利空" in line or "🔴" in line:
-                risk_lines.append(f"  {item['name']}：{line.strip()}")
+    # 动态计算高度
+    total_lines = 0
+    for sd in stocks_data:
+        total_lines += 1  # 股票名
+        msg_text = sd["result"]
+        count = msg_text.count('\n') + 1
+        total_lines += count
+        total_lines += 1  # 空行
 
-    # 构建风险提示部分
-    risk_section = ""
-    if risk_lines:
-        risk_section = "【⚠️ 风险预警】\n"
-        for rl in risk_lines[:10]:  # 最多10条风险
-            risk_section += f"🔴 {rl}\n"
-        risk_section += "\n"
+    fig_height = max(12, total_lines * 0.4 + 4)
+    fig, ax = plt.subplots(figsize=(14, fig_height), facecolor='#F4F6F9')
+    ax.set_facecolor('#F4F6F9')
+    ax.axis('off')
+
+    y_pos = fig_height - 0.8
+    # 标题
+    ax.text(0.5, y_pos/fig_height + 0.02, f"📈 持仓消息简报 ({report_date})", transform=ax.transAxes,
+            ha='center', fontproperties=font_title, color='#1a1a2e')
+    y_pos -= 1.2
+
+    # 风险提示模块
+    risk_msgs = []
+    for sd in stocks_data:
+        for line in sd["result"].split('\n'):
+            if '利空' in line or '减持' in line or '问询' in line or '处罚' in line:
+                risk_msgs.append(f"🔴 {sd['name']}：{line.strip()}")
+    if risk_msgs:
+        ax.text(0.08, y_pos/fig_height, "⚠️ 风险预警", transform=ax.transAxes,
+                fontproperties=font_head, color='#CC0000')
+        y_pos -= 0.6
+        for r in risk_msgs[:8]:
+            ax.text(0.1, y_pos/fig_height, r, transform=ax.transAxes,
+                    fontproperties=font_small, color='#333333')
+            y_pos -= 0.4
     else:
-        risk_section = "【⚠️ 风险预警】\n今日未发现明确利空信号\n\n"
+        ax.text(0.08, y_pos/fig_height, "⚠️ 风险预警：今日未发现明显利空", transform=ax.transAxes,
+                fontproperties=font_head, color='#555555')
+        y_pos -= 0.6
 
-    prompt = f"""你是资深投资分析师。今天日期：{report_date}。
+    y_pos -= 0.6
+    ax.axhline(y=y_pos/fig_height + 0.02, color='#E0E0E0', linewidth=0.5)
 
-请基于以下搜索到的近一周消息，生成一份精简的消息面简报。严格按以下结构输出：
+    # 个股消息模块
+    for sd in stocks_data:
+        if y_pos < 1.5:
+            break
+        # 股票名称
+        ax.text(0.08, y_pos/fig_height, f"▌{sd['name']} ({sd['code']})", transform=ax.transAxes,
+                fontproperties=font_head, color='#1a1a2e')
+        y_pos -= 0.6
+        msg_text = sd["result"]
+        lines = msg_text.split('\n')
+        for line in lines:
+            if y_pos < 1.0:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            # 截断过长行
+            if len(line) > 100:
+                line = line[:97] + '...'
+            ax.text(0.12, y_pos/fig_height, line, transform=ax.transAxes,
+                    fontproperties=font_body, color='#333333')
+            y_pos -= 0.45
+        y_pos -= 0.3  # 空行
 
-【⚠️ 风险预警】
-- 如果以下消息中存在减持、监管问询、业绩大幅下滑、重大诉讼等利空，请在此处汇总，每条用🔴标记
-- 如果没有利空，写"今日未发现明确利空信号"
+    # 底部
+    ax.text(0.5, 0.02, "数据源：DeepSeek 联网搜索 | 仅供参考，不构成投资建议",
+            transform=ax.transAxes, ha='center', fontproperties=font_small, color='#999999')
 
-【📊 个股消息及判断】
-对每只股票，直接复述其搜索结果（已包含利好/利空/中性判断和原因），不要重新分析。如果某只股票显示"近一周未搜到相关消息"或"搜索暂时不可用"，保留原文即可，不要删掉。
-
-{data_text}
-
-只输出上述两个模块的内容，不要添加开头语、结尾语或额外分析。"""
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": 2000,
-        "stream": False
-    }
-
-    try:
-        resp = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"❌ AI调用失败：{str(e)}"
+    plt.tight_layout(pad=2)
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
+    plt.close()
+    buf.seek(0)
+    return buf.read()
 
 # ------------------------------------------------------------
 # 主流程
 # ------------------------------------------------------------
 def main():
-    now = beijing_now()
-    report_date = beijing_date()
+    print(f"简报开始 - {beijing_now()}")
     stocks = load_stocks()
     if not stocks:
-        send_email("消息简报 - 错误", "股票列表为空")
+        send_email("消息简报 - 错误", "股票列表为空", b"")
         return
 
-    # 判断是否为下午
+    report_date = beijing_date()
+    now = beijing_now()
+
+    # 判断上午/下午
     morning_file = os.environ.get("MORNING_DATA_PATH", "")
     morning_msgs = {}
     if morning_file and os.path.exists(morning_file):
@@ -183,69 +225,77 @@ def main():
             with open(morning_file, "r", encoding="utf-8") as f:
                 morning_msgs = json.load(f)
         except:
-            morning_msgs = {}
+            pass
     is_afternoon = bool(morning_msgs)
 
-    # 对每只股票联网搜索
-    all_results = []
+    # 收集所有股票新闻
+    stocks_data = []
     for code, name in stocks:
-        print(f"联网搜索：{name}({code})...")
-        search_result = search_with_deepseek(code, name, report_date)
-        print(f"  搜索完成")
-        all_results.append({
-            "name": name,
-            "code": code,
-            "result": search_result
-        })
+        print(f"搜索：{name}({code})")
+        result = search_stock_news(code, name, report_date)
+        stocks_data.append({"name": name, "code": code, "result": result})
 
-    # 生成最终简报
-    print("生成最终简报...")
-    final_brief = generate_final_summary(all_results, report_date)
-
-    if not is_afternoon:
-        # 上午模式：完整简报
-        body = f"📈 每日消息简报 | {now}\n"
-        body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        body += final_brief
-        body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-        body += "数据源：DeepSeek 联网搜索 | 仅供参考，不构成投资建议"
-
-        send_email(f"📈 消息简报 {now}", body)
-
-        # 保存上午摘要用于下午对比
-        morning_data = {}
-        for item in all_results:
-            morning_data[item["code"]] = item["result"][:200]
-        with open("morning_news.json", "w", encoding="utf-8") as f:
-            json.dump(morning_data, f, ensure_ascii=False)
-        print("上午数据已保存")
+    # 生成文字版简报
+    text_body = f"📈 每日消息简报 | {now}\n"
+    text_body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    # 风险预警（简单提取）
+    risk_list = []
+    for sd in stocks_data:
+        for line in sd["result"].split('\n'):
+            if '利空' in line:
+                risk_list.append(f"🔴 {sd['name']}：{line.strip()}")
+    if risk_list:
+        text_body += "【⚠️ 风险预警】\n" + "\n".join(risk_list[:10]) + "\n\n"
     else:
-        # 下午模式：只检测新增
+        text_body += "【⚠️ 风险预警】\n今日未发现明确利空信号\n\n"
+    text_body += "【📊 个股消息及判断】\n"
+    for sd in stocks_data:
+        text_body += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
+    text_body += "\n━━━━━━━━━━━━━━━━━━━━━━\n数据源：DeepSeek 联网搜索 | 仅供参考"
+
+    # 生成图片
+    img_data = generate_image(stocks_data, report_date)
+
+    # 发送邮件
+    if not is_afternoon:
+        send_email(f"📈 消息简报 {now}", text_body, img_data)
+        # 保存上午指纹
+        fingerprint = {}
+        for sd in stocks_data:
+            fingerprint[sd["code"]] = sd["result"][:200]
+        with open("morning_news.json", "w", encoding="utf-8") as f:
+            json.dump(fingerprint, f, ensure_ascii=False)
+        print("上午简报已发送并保存")
+    else:
+        # 下午模式，比较新增
+        new_data = []
         has_new = False
-        new_items = []
-        for item in all_results:
-            code = item["code"]
-            old_fingerprint = morning_msgs.get(code, "")
-            new_fingerprint = item["result"][:200]
-            if new_fingerprint != old_fingerprint and "未搜到相关消息" not in item["result"] and "搜索失败" not in item["result"]:
+        for sd in stocks_data:
+            old = morning_msgs.get(sd["code"], "")
+            new_finger = sd["result"][:200]
+            if new_finger != old and "未搜到" not in sd["result"] and "搜索不可用" not in sd["result"]:
+                new_data.append(sd)
                 has_new = True
-                new_items.append(item)
-
-        if not has_new:
-            print("无新增消息，不发送邮件")
+        if has_new:
+            new_text = f"📈 午间消息更新 | {now}\n"
+            new_text += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            # 简单风险
+            risk_list = []
+            for sd in new_data:
+                for line in sd["result"].split('\n'):
+                    if '利空' in line:
+                        risk_list.append(f"🔴 {sd['name']}：{line.strip()}")
+            if risk_list:
+                new_text += "【⚠️ 风险预警】\n" + "\n".join(risk_list) + "\n\n"
+            new_text += "【📊 新增个股消息】\n"
+            for sd in new_data:
+                new_text += f"\n🔹 {sd['name']}（{sd['code']}）\n{sd['result']}\n"
+            new_text += "\n━━━━━━━━━━━━━━━━━━━━━━\n数据源：DeepSeek 联网搜索 | 仅供参考"
+            new_img = generate_image(new_data, report_date)
+            send_email(f"📈 午间消息更新 {now}", new_text, new_img)
+            print("下午新增简报已发送")
         else:
-            print(f"发现新增消息，发送简报")
-            final_brief_pm = generate_final_summary(new_items, report_date)
-
-            body = f"📈 午间消息更新 | {now}\n"
-            body += "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            body += final_brief_pm
-            body += "\n━━━━━━━━━━━━━━━━━━━━━━\n"
-            body += "数据源：DeepSeek 联网搜索 | 仅供参考"
-
-            send_email(f"📈 午间消息更新 {now}", body)
-
-    print("任务结束")
+            print("无新增消息，不发送邮件")
 
 if __name__ == "__main__":
     main()
